@@ -413,6 +413,11 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
     m_repairCdfTrajectoryButton = new QPushButton(QStringLiteral("Repair imported trajectory with CDF/QP"), cdfPage);
     cdfLayout->addWidget(m_repairCdfTrajectoryButton);
 
+    m_exportCdfTrajectoryButton = new QPushButton(
+        QStringLiteral("Export OMPL + CDF/QP trajectory..."),
+        cdfPage);
+    cdfLayout->addWidget(m_exportCdfTrajectoryButton);
+
     m_cdfResult = new QLabel(QStringLiteral("Import a CDF joint angle file."), cdfPage);
     m_cdfResult->setWordWrap(true);
     cdfLayout->addWidget(m_cdfResult);
@@ -450,6 +455,9 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
     });
     connect(m_repairCdfTrajectoryButton, &QPushButton::clicked, this, [this]() {
         emit repairImportedCdfTrajectoryRequested();
+    });
+    connect(m_exportCdfTrajectoryButton, &QPushButton::clicked, this, [this]() {
+        emit exportCdfTrajectoryRequested();
     });
     connect(m_poseTable, &QTableWidget::customContextMenuRequested,
         this, &MotionPlanningEditorWidget::showControlPointContextMenu);
@@ -698,6 +706,12 @@ void MotionPlanningEditorWidget::setCdfJointAngleView(
     updateCdfActions();
 }
 
+void MotionPlanningEditorWidget::setCdfExportAvailable(bool available)
+{
+    m_cdfExportAvailable = available;
+    updateCdfActions();
+}
+
 void MotionPlanningEditorWidget::setCdfResult(const QString& summary, bool success)
 {
     if(m_cdfResult == nullptr) {
@@ -781,6 +795,9 @@ void MotionPlanningEditorWidget::updateCdfActions()
     }
     if(m_repairCdfTrajectoryButton != nullptr) {
         m_repairCdfTrajectoryButton->setEnabled(hasRobot && hasImportedRows);
+    }
+    if(m_exportCdfTrajectoryButton != nullptr) {
+        m_exportCdfTrajectoryButton->setEnabled(hasRobot && m_cdfExportAvailable);
     }
 }
 

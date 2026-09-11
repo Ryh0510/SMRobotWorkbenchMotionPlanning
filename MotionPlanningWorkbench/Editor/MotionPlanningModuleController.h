@@ -52,6 +52,7 @@ namespace robot_qt_viewer
         void applySelectedJointPoint(int pointIndex);
         void applySelectedCdfJointAngles(int pointIndex);
         void repairImportedCdfTrajectory();
+        void exportCdfTrajectory();
         void insertControlPointBefore(int pointIndex);
         void insertControlPointAfter(int pointIndex);
         void deleteControlPoint(int pointIndex);
@@ -93,6 +94,7 @@ namespace robot_qt_viewer
         int m_playbackPointIndex = 0;
         int m_playbackCollisionSamples = 0;
         int m_playbackCollisionHits = 0;
+        int m_playbackInvalidSamples = 0;
         bool m_playbackFinishedNaturally = false;
         std::unique_ptr<motion_planning::ProjectPlanningSceneSnapshot> m_playbackCollisionScene;
     };
