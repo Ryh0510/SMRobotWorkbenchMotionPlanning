@@ -60,6 +60,7 @@ namespace robot_qt_viewer
         void startJointPlayback(double durationSeconds);
         void stopJointPlayback();
         void advanceJointPlayback();
+        void setSprayRangeVisible(bool visible);
         void setSelectedTrajectory(const QString& trajectoryId);
         void setSelectedRobot(const QString& robotId);
         void ensurePersistentCdfCollisionSetup();
@@ -96,6 +97,7 @@ namespace robot_qt_viewer
         int m_playbackCollisionHits = 0;
         int m_playbackInvalidSamples = 0;
         bool m_playbackFinishedNaturally = false;
+        bool m_sprayRangeVisible = false;
         std::unique_ptr<motion_planning::ProjectPlanningSceneSnapshot> m_playbackCollisionScene;
     };
 }

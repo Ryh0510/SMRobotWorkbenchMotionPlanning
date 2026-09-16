@@ -110,6 +110,7 @@ signals:
     void editControlPointRequested(int pointIndex);
     void playbackRequested(double durationSeconds);
     void playbackStopRequested();
+    void sprayRangeVisibilityChanged(bool visible);
     void trajectorySelectionChanged(const QString& trajectoryId);
 
 private:
@@ -130,6 +131,7 @@ private:
     QPushButton* m_applyJointPointButton = nullptr;
     QDoubleSpinBox* m_playbackDuration = nullptr;
     QPushButton* m_playbackButton = nullptr;
+    QCheckBox* m_sprayRangeVisible = nullptr;
     QComboBox* m_trajectoryCombo = nullptr;
     QTableWidget* m_poseTable = nullptr;
     QTableWidget* m_jointTable = nullptr;

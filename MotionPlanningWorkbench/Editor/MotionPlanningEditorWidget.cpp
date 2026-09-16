@@ -341,6 +341,9 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
     playbackLayout->addWidget(m_playbackButton);
     layout->addLayout(playbackLayout);
 
+    m_sprayRangeVisible = new QCheckBox(QStringLiteral("Show spray range"), basicPage);
+    layout->addWidget(m_sprayRangeVisible);
+
     m_result = new QLabel(QStringLiteral("Select a robot and enter joint vectors."), this);
     m_result->setWordWrap(true);
     layout->addWidget(m_result);
@@ -450,6 +453,8 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
             emit playbackRequested(m_playbackDuration != nullptr ? m_playbackDuration->value() : 5.0);
         }
     });
+    connect(m_sprayRangeVisible, &QCheckBox::toggled,
+        this, &MotionPlanningEditorWidget::sprayRangeVisibilityChanged);
     connect(m_applyCdfJointButton, &QPushButton::clicked, this, [this]() {
         emit applySelectedCdfJointAnglesRequested(selectedOriginalPointIndex(m_cdfJointTable));
     });

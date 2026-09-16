@@ -485,6 +485,8 @@ namespace robot_qt_viewer
             this, &MotionPlanningModuleController::startJointPlayback);
         connect(&m_widget, &MotionPlanningEditorWidget::playbackStopRequested,
             this, &MotionPlanningModuleController::stopJointPlayback);
+        connect(&m_widget, &MotionPlanningEditorWidget::sprayRangeVisibilityChanged,
+            this, &MotionPlanningModuleController::setSprayRangeVisible);
         connect(&m_widget, &MotionPlanningEditorWidget::trajectorySelectionChanged,
             this, &MotionPlanningModuleController::setSelectedTrajectory);
         connect(m_playbackTimer, &QTimer::timeout,
@@ -550,6 +552,7 @@ namespace robot_qt_viewer
             ensurePersistentCdfCollisionSetup();
             refreshTrajectoryView();
         } else if(event.kind == RobotQtViewerEventKind::ProjectDocumentChanged) {
+            setSprayRangeVisible(m_sprayRangeVisible);
             refreshTrajectoryView();
         }
     }
@@ -1549,6 +1552,7 @@ namespace robot_qt_viewer
             stopJointPlayback();
         }
         m_selectedRobotId = robotId;
+        setSprayRangeVisible(m_sprayRangeVisible);
         m_widget.setRobotId(robotId);
         if(robotId.isEmpty()) {
             refreshTrajectoryView();
@@ -1573,6 +1577,14 @@ namespace robot_qt_viewer
         }
         m_widget.setJointDefaults(names.join(QStringLiteral(", ")), values.join(QStringLiteral(", ")));
         refreshTrajectoryView();
+    }
+
+    void MotionPlanningModuleController::setSprayRangeVisible(bool visible)
+    {
+        m_sprayRangeVisible = visible;
+        if(RobotQtViewerViewportServices* viewportServices = m_context.viewportServices()) {
+            viewportServices->setSprayRangeVisible(m_selectedRobotId, visible);
+        }
     }
 
     void MotionPlanningModuleController::refreshTrajectoryView()
