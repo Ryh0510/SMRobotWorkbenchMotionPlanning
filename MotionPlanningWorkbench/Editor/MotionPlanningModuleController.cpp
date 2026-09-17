@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -487,6 +488,12 @@ namespace robot_qt_viewer
             this, &MotionPlanningModuleController::stopJointPlayback);
         connect(&m_widget, &MotionPlanningEditorWidget::sprayRangeVisibilityChanged,
             this, &MotionPlanningModuleController::setSprayRangeVisible);
+        connect(&m_widget, &MotionPlanningEditorWidget::sprayMeasurementEnabledChanged,
+            this, &MotionPlanningModuleController::setSprayMeasurementEnabled);
+        connect(&m_widget, &MotionPlanningEditorWidget::exportSprayMeasurementsRequested,
+            this, &MotionPlanningModuleController::exportSprayMeasurements);
+        connect(&m_widget, &MotionPlanningEditorWidget::plotSprayMeasurementsRequested,
+            this, &MotionPlanningModuleController::plotSprayMeasurements);
         connect(&m_widget, &MotionPlanningEditorWidget::trajectorySelectionChanged,
             this, &MotionPlanningModuleController::setSelectedTrajectory);
         connect(m_playbackTimer, &QTimer::timeout,
@@ -548,6 +555,8 @@ namespace robot_qt_viewer
         if(event.kind == RobotQtViewerEventKind::SelectionChanged) {
             setSelectedRobot(event.selection.robotId);
         } else if(event.kind == RobotQtViewerEventKind::ProjectOpened) {
+            stopJointPlayback();
+            clearSprayMeasurements();
             setSelectedRobot(m_context.selectionModel().state().robotId);
             ensurePersistentCdfCollisionSetup();
             refreshTrajectoryView();
@@ -867,6 +876,7 @@ namespace robot_qt_viewer
 
     void MotionPlanningModuleController::applySelectedJointPoint(int pointIndex)
     {
+        stopJointPlayback();
         if(pointIndex < 0 || m_selectedRobotId.isEmpty() || m_selectedTrajectoryId.isEmpty()) {
             return;
         }
@@ -904,6 +914,7 @@ namespace robot_qt_viewer
 
     void MotionPlanningModuleController::applySelectedCdfJointAngles(int pointIndex)
     {
+        stopJointPlayback();
         if(pointIndex < 0 || m_selectedRobotId.isEmpty()) {
             return;
         }
@@ -1452,6 +1463,13 @@ namespace robot_qt_viewer
         }
 
         m_playbackPointIndex = 0;
+        m_spraySamples.clear();
+        m_spraySamples.reserve(selectedPlan->trajectory.points.size());
+        m_sprayJointNames = selectedPlan->jointNames;
+        m_sprayRobotId = m_selectedRobotId;
+        m_sprayTrajectoryId = m_selectedTrajectoryId;
+        m_sprayPlaybackActive = true;
+        m_widget.setSprayRecordingState(false, true, m_sprayExportPending);
         m_widget.setPlaybackActive(true);
         const int intervalMs = pointCount <= 1
             ? 1
@@ -1470,6 +1488,8 @@ namespace robot_qt_viewer
 
     void MotionPlanningModuleController::stopJointPlayback()
     {
+        const bool sprayWasActive = m_sprayPlaybackActive;
+        m_sprayPlaybackActive = false;
         const bool wasActive = m_playbackTimer != nullptr && m_playbackTimer->isActive();
         if(m_playbackTimer != nullptr) {
             m_playbackTimer->stop();
@@ -1478,6 +1498,19 @@ namespace robot_qt_viewer
         if(wasActive || m_playbackFinishedNaturally) {
             m_widget.setResult(playbackCollisionSummary(), true);
         }
+        if(sprayWasActive && m_sprayExportPending) {
+            m_sprayExportPending = false;
+            if(m_playbackFinishedNaturally) {
+                QTimer::singleShot(0, this, [this]() {
+                    if(!m_sprayPlaybackActive && !m_spraySamples.empty()) {
+                        exportSprayMeasurements();
+                    }
+                });
+            } else {
+                emit statusMessageRequested(QStringLiteral("Playback interrupted; partial spray samples retained. Export request cancelled."), 6000);
+            }
+        }
+        m_widget.setSprayRecordingState(!m_spraySamples.empty(), false, m_sprayExportPending);
     }
 
     void MotionPlanningModuleController::advanceJointPlayback()
@@ -1512,6 +1545,17 @@ namespace robot_qt_viewer
             return;
         }
 
+        if(m_sprayMeasurementEnabled) {
+            SprayMeasurementSample spraySample;
+            spraySample.pointIndex = m_playbackPointIndex;
+            spraySample.timeSeconds = point.time;
+            spraySample.jointValues = point.q;
+            spraySample.runtimeJointValues = maybeMapIrb4600JointSigns(
+                m_context.document(), m_selectedRobotId, point.q);
+            spraySample.measurement = m_currentSprayMeasurement;
+            m_spraySamples.push_back(std::move(spraySample));
+        }
+
         ++m_playbackCollisionSamples;
         if(m_playbackCollisionScene != nullptr) {
             const std::vector<double> runtimeJointValues = maybeMapIrb4600JointSigns(
@@ -1543,6 +1587,7 @@ namespace robot_qt_viewer
         }
         stopJointPlayback();
         m_selectedTrajectoryId = trajectoryId;
+        clearSprayMeasurements();
         refreshTrajectoryView();
     }
 
@@ -1550,6 +1595,7 @@ namespace robot_qt_viewer
     {
         if(m_selectedRobotId != robotId) {
             stopJointPlayback();
+            clearSprayMeasurements();
         }
         m_selectedRobotId = robotId;
         setSprayRangeVisible(m_sprayRangeVisible);
@@ -1585,6 +1631,126 @@ namespace robot_qt_viewer
         if(RobotQtViewerViewportServices* viewportServices = m_context.viewportServices()) {
             viewportServices->setSprayRangeVisible(m_selectedRobotId, visible);
         }
+    }
+
+    void MotionPlanningModuleController::setSprayMeasurementEnabled(bool enabled)
+    {
+        if(m_sprayMeasurementEnabled == enabled) {
+            return;
+        }
+
+        m_sprayMeasurementEnabled = enabled;
+        if(!enabled) {
+            m_currentSprayMeasurement = SprayMeasurementResult{};
+            m_spraySamples.clear();
+            m_sprayExportPending = false;
+        }
+        if(enabled) {
+            updateSprayMeasurement();
+        } else {
+            m_widget.setSprayMeasurementText(
+                QStringLiteral("Spray distance: -- mm\nSpray angle: -- deg\nCalculation disabled"));
+        }
+        m_widget.setSprayRecordingState(
+            !m_spraySamples.empty(), m_sprayPlaybackActive, m_sprayExportPending);
+    }
+
+    void MotionPlanningModuleController::updateSprayMeasurement()
+    {
+        if(!m_sprayMeasurementEnabled) {
+            return;
+        }
+        const auto* services = m_context.viewportServices();
+        m_currentSprayMeasurement = services
+            ? services->sprayMeasurement(m_selectedRobotId) : SprayMeasurementResult{};
+        const auto& result = m_currentSprayMeasurement;
+        m_widget.setSprayMeasurementText(result.valid
+            ? QStringLiteral("Spray distance: %1 mm\nSpray angle: %2 deg")
+                .arg(result.distanceMeters * 1000.0, 0, 'f', 3)
+                .arg(result.angleDegrees, 0, 'f', 3)
+            : QStringLiteral("Spray distance: -- mm\nSpray angle: -- deg\n%1").arg(result.errorMessage));
+    }
+
+    void MotionPlanningModuleController::clearSprayMeasurements()
+    {
+        m_spraySamples.clear();
+        m_sprayExportPending = false;
+        m_sprayPlaybackActive = false;
+        m_playbackFinishedNaturally = false;
+        m_widget.setSprayRecordingState(false, false, false);
+        m_widget.setSprayMeasurementText(m_sprayMeasurementEnabled
+            ? QStringLiteral("Spray distance: -- mm\nSpray angle: -- deg")
+            : QStringLiteral("Spray distance: -- mm\nSpray angle: -- deg\nCalculation disabled"));
+    }
+
+    void MotionPlanningModuleController::exportSprayMeasurements()
+    {
+        if(!m_sprayMeasurementEnabled) {
+            return;
+        }
+        if(m_sprayPlaybackActive || m_spraySamples.empty()) {
+            m_sprayExportPending = true;
+            m_widget.setSprayRecordingState(!m_spraySamples.empty(), m_sprayPlaybackActive, true);
+            emit statusMessageRequested(QStringLiteral("Spray results will be exported after playback completes."), 5000);
+            return;
+        }
+        QString path = getSaveFileName(QStringLiteral("motionPlanning.sprayMeasurements.save"),
+            &m_widget, QStringLiteral("Export spray distance and angle"),
+            m_sprayRobotId + QStringLiteral("_spray_measurements.txt"),
+            QStringLiteral("Text Files (*.txt);;All Files (*)"));
+        if(path.isEmpty()) { return; }
+        if(!path.endsWith(QStringLiteral(".txt"), Qt::CaseInsensitive)) { path += QStringLiteral(".txt"); }
+        QSaveFile file(path);
+        if(!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            m_widget.setResult(file.errorString(), false);
+            return;
+        }
+        QTextStream text(&file);
+        text.setCodec("UTF-8");
+        text.setLocale(QLocale::c());
+        text.setRealNumberNotation(QTextStream::ScientificNotation);
+        text.setRealNumberPrecision(10);
+        text << "# robot=" << m_sprayRobotId << " trajectory=" << m_sprayTrajectoryId << " target=burnner\n";
+        text << "# playback_complete=" << (m_playbackFinishedNaturally ? 1 : 0) << '\n';
+        text << "# Angle: 0=normal incidence; +/-90=grazing. STL normal n faces nozzle; sign=(n cross ray) dot nozzle_local_X.\n";
+        text << "# time_s is source trajectory time. Joint values are radians (prismatic: meters).\n";
+        text << "index\ttime_s";
+        for(const auto& name : m_sprayJointNames) { text << '\t' << QString::fromStdString(name) << "_source"; }
+        for(const auto& name : m_sprayJointNames) { text << '\t' << QString::fromStdString(name) << "_runtime"; }
+        text << "\tdistance_m\tangle_deg\tvalid\tstatus\n";
+        for(const auto& sample : m_spraySamples) {
+            text << sample.pointIndex + 1 << '\t' << sample.timeSeconds;
+            for(double value : sample.jointValues) { text << '\t' << value; }
+            for(double value : sample.runtimeJointValues) { text << '\t' << value; }
+            if(sample.measurement.valid) {
+                text << '\t' << sample.measurement.distanceMeters << '\t' << sample.measurement.angleDegrees << "\t1\tOK\n";
+            } else {
+                QString reason = sample.measurement.errorMessage;
+                reason.replace('\t', ' ').replace('\r', ' ').replace('\n', ' ');
+                text << "\tnan\tnan\t0\t" << reason << '\n';
+            }
+        }
+        text.flush();
+        if(text.status() != QTextStream::Ok || !file.commit()) {
+            m_widget.setResult(QStringLiteral("Spray export failed: %1").arg(file.errorString()), false);
+            return;
+        }
+        m_widget.setResult(QStringLiteral("Exported %1 spray samples to %2").arg(m_spraySamples.size()).arg(path), true);
+    }
+
+    void MotionPlanningModuleController::plotSprayMeasurements()
+    {
+        if(!m_sprayMeasurementEnabled || m_spraySamples.empty() || m_sprayPlaybackActive) { return; }
+        QVector<double> distances, angles;
+        for(const auto& sample : m_spraySamples) {
+            distances.push_back(sample.measurement.valid ? sample.measurement.distanceMeters * 1000.0
+                : std::numeric_limits<double>::quiet_NaN());
+            angles.push_back(sample.measurement.valid ? sample.measurement.angleDegrees
+                : std::numeric_limits<double>::quiet_NaN());
+        }
+        m_widget.showSprayMeasurementPlot(distances, angles,
+            QStringLiteral("Spray measurements - %1 / %2 (%3 points)")
+                .arg(m_sprayRobotId, m_sprayTrajectoryId).arg(m_spraySamples.size()));
     }
 
     void MotionPlanningModuleController::refreshTrajectoryView()
@@ -1807,6 +1973,9 @@ namespace robot_qt_viewer
                 robotJointValues[index]);
         }
         m_context.documentController().publishRobotRuntimeChanged(sourceId);
+        if(m_sprayMeasurementEnabled) {
+            updateSprayMeasurement();
+        }
         return true;
     }
 

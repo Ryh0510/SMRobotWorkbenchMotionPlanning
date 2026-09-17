@@ -89,6 +89,10 @@ public:
     CdfQpRepairSettings cdfQpRepairSettings() const;
     bool editControlPointPose(ControlPointPoseEditorData& data, const QString& title);
     void setPlaybackActive(bool active);
+    void setSprayMeasurementText(const QString& text);
+    void setSprayRecordingState(bool hasSamples, bool active, bool exportPending);
+    void showSprayMeasurementPlot(const QVector<double>& distancesMm,
+        const QVector<double>& anglesDegrees, const QString& title);
 
 signals:
     void planRequested(
@@ -111,6 +115,9 @@ signals:
     void playbackRequested(double durationSeconds);
     void playbackStopRequested();
     void sprayRangeVisibilityChanged(bool visible);
+    void sprayMeasurementEnabledChanged(bool enabled);
+    void exportSprayMeasurementsRequested();
+    void plotSprayMeasurementsRequested();
     void trajectorySelectionChanged(const QString& trajectoryId);
 
 private:
@@ -132,6 +139,10 @@ private:
     QDoubleSpinBox* m_playbackDuration = nullptr;
     QPushButton* m_playbackButton = nullptr;
     QCheckBox* m_sprayRangeVisible = nullptr;
+    QCheckBox* m_sprayMeasurementEnabled = nullptr;
+    QLabel* m_sprayMeasurement = nullptr;
+    QPushButton* m_exportSprayMeasurements = nullptr;
+    QPushButton* m_plotSprayMeasurements = nullptr;
     QComboBox* m_trajectoryCombo = nullptr;
     QTableWidget* m_poseTable = nullptr;
     QTableWidget* m_jointTable = nullptr;

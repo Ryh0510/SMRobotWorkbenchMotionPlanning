@@ -1,6 +1,7 @@
 #pragma once
 
 #include "RobotQtViewerEvents.h"
+#include "RobotQtViewerViewportServices.h"
 
 #include <QObject>
 #include <QString>
@@ -61,6 +62,11 @@ namespace robot_qt_viewer
         void stopJointPlayback();
         void advanceJointPlayback();
         void setSprayRangeVisible(bool visible);
+        void setSprayMeasurementEnabled(bool enabled);
+        void updateSprayMeasurement();
+        void exportSprayMeasurements();
+        void plotSprayMeasurements();
+        void clearSprayMeasurements();
         void setSelectedTrajectory(const QString& trajectoryId);
         void setSelectedRobot(const QString& robotId);
         void ensurePersistentCdfCollisionSetup();
@@ -98,6 +104,22 @@ namespace robot_qt_viewer
         int m_playbackInvalidSamples = 0;
         bool m_playbackFinishedNaturally = false;
         bool m_sprayRangeVisible = false;
+        bool m_sprayMeasurementEnabled = true;
+        struct SprayMeasurementSample
+        {
+            int pointIndex = 0;
+            double timeSeconds = 0.0;
+            std::vector<double> jointValues;
+            std::vector<double> runtimeJointValues;
+            SprayMeasurementResult measurement;
+        };
+        SprayMeasurementResult m_currentSprayMeasurement;
+        std::vector<SprayMeasurementSample> m_spraySamples;
+        std::vector<std::string> m_sprayJointNames;
+        QString m_sprayRobotId;
+        QString m_sprayTrajectoryId;
+        bool m_sprayPlaybackActive = false;
+        bool m_sprayExportPending = false;
         std::unique_ptr<motion_planning::ProjectPlanningSceneSnapshot> m_playbackCollisionScene;
     };
 }

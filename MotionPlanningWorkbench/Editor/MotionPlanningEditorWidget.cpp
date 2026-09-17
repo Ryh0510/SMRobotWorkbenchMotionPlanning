@@ -14,6 +14,8 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
+#include <QPainter>
+#include <QPainterPath>
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QSpinBox>
@@ -24,10 +26,101 @@
 #include <QTabWidget>
 #include <QVBoxLayout>
 
+#include <algorithm>
+#include <cmath>
+#include <limits>
+
 namespace
 {
     constexpr int kOriginalPointIndexRole = Qt::UserRole + 101;
     constexpr int kLargeTrajectoryTablePreviewLimit = 1000;
+
+    class SprayCurveWidget : public QWidget
+    {
+    public:
+        SprayCurveWidget(const QVector<double>& values, const QString& title,
+            const QColor& color, QWidget* parent)
+            : QWidget(parent), m_values(values), m_title(title), m_color(color)
+        {
+            setMinimumSize(420, 210);
+        }
+
+    protected:
+        void paintEvent(QPaintEvent*) override
+        {
+            QPainter painter(this);
+            painter.setRenderHint(QPainter::Antialiasing);
+            painter.fillRect(rect(), palette().base());
+            const QRectF plot(76, 32, width() - 100, height() - 78);
+            double low = std::numeric_limits<double>::max();
+            double high = std::numeric_limits<double>::lowest();
+            for(double value : m_values) {
+                if(std::isfinite(value)) {
+                    low = std::min(low, value);
+                    high = std::max(high, value);
+                }
+            }
+            const bool hasValid = low <= high;
+            if(!hasValid) { low = 0.0; high = 1.0; }
+            const double padding = std::max((high - low) * 0.08, 0.1);
+            low -= padding;
+            high += padding;
+            const QColor textColor = palette().text().color();
+            painter.setPen(textColor);
+            painter.drawText(QRectF(76, 5, plot.width(), 24), Qt::AlignLeft, m_title);
+            for(int tick = 0; tick <= 4; ++tick) {
+                const double fraction = tick / 4.0;
+                const double y = plot.bottom() - fraction * plot.height();
+                painter.setPen(palette().mid().color());
+                painter.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y));
+                painter.setPen(textColor);
+                painter.drawText(QRectF(0, y - 10, 68, 20), Qt::AlignRight | Qt::AlignVCenter,
+                    QString::number(low + fraction * (high - low), 'g', 5));
+            }
+            const int lastIndex = std::max(0, m_values.size() - 1);
+            const int xTicks = std::min(4, lastIndex);
+            for(int tick = 0; tick <= xTicks; ++tick) {
+                const int index = xTicks == 0 ? 0 : qRound(lastIndex * tick / double(xTicks));
+                const double x = plot.left() + plot.width() * index / std::max(1, lastIndex);
+                painter.setPen(palette().mid().color());
+                painter.drawLine(QPointF(x, plot.top()), QPointF(x, plot.bottom()));
+                painter.setPen(textColor);
+                painter.drawText(QRectF(x - 30, plot.bottom() + 3, 60, 20), Qt::AlignCenter,
+                    QString::number(index + 1));
+            }
+            painter.setPen(textColor);
+            painter.drawRect(plot);
+            painter.drawText(QRectF(plot.left(), height() - 24, plot.width(), 22), Qt::AlignCenter,
+                QStringLiteral("Trajectory point"));
+            if(!hasValid) {
+                painter.drawText(plot, Qt::AlignCenter, QStringLiteral("No valid surface intersections"));
+                return;
+            }
+            painter.save();
+            painter.setClipRect(plot.adjusted(-3, -3, 3, 3));
+            painter.setPen(QPen(m_color, 1.6));
+            QPainterPath path;
+            bool connected = false;
+            for(int index = 0; index < m_values.size(); ++index) {
+                if(!std::isfinite(m_values[index])) { connected = false; continue; }
+                const QPointF point(plot.left() + plot.width() * index / std::max(1, lastIndex),
+                    plot.bottom() - (m_values[index] - low) / (high - low) * plot.height());
+                if(connected) { path.lineTo(point); } else { path.moveTo(point); }
+                if(m_values.size() <= 200 || !connected || index == lastIndex ||
+                    !std::isfinite(m_values[index + 1])) {
+                    painter.drawEllipse(point, 2.0, 2.0);
+                }
+                connected = true;
+            }
+            painter.drawPath(path);
+            painter.restore();
+        }
+
+    private:
+        QVector<double> m_values;
+        QString m_title;
+        QColor m_color;
+    };
 
     void configureTrajectoryTable(
         QTableWidget* table,
@@ -344,6 +437,26 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
     m_sprayRangeVisible = new QCheckBox(QStringLiteral("Show spray range"), basicPage);
     layout->addWidget(m_sprayRangeVisible);
 
+    m_sprayMeasurementEnabled = new QCheckBox(
+        QStringLiteral("Calculate spray distance and angle"), basicPage);
+    m_sprayMeasurementEnabled->setObjectName(QStringLiteral("sprayMeasurementEnabled"));
+    m_sprayMeasurementEnabled->setChecked(true);
+    layout->addWidget(m_sprayMeasurementEnabled);
+
+    m_sprayMeasurement = new QLabel(QStringLiteral("Spray distance: -- mm\nSpray angle: -- deg"), basicPage);
+    m_sprayMeasurement->setObjectName(QStringLiteral("sprayMeasurementResult"));
+    m_sprayMeasurement->setWordWrap(true);
+    layout->addWidget(m_sprayMeasurement);
+    m_exportSprayMeasurements = new QPushButton(
+        QStringLiteral("\u5bfc\u51fa\u55b7\u6d82\u8ddd\u79bb\u548c\u55b7\u6d82\u89d2\u5ea6"), basicPage);
+    m_exportSprayMeasurements->setObjectName(QStringLiteral("exportSprayMeasurements"));
+    m_plotSprayMeasurements = new QPushButton(
+        QStringLiteral("\u7ed8\u5236\u55b7\u6d82\u8ddd\u79bb\u548c\u55b7\u6d82\u89d2\u5ea6\u56fe"), basicPage);
+    m_plotSprayMeasurements->setObjectName(QStringLiteral("plotSprayMeasurements"));
+    m_plotSprayMeasurements->setEnabled(false);
+    layout->addWidget(m_exportSprayMeasurements);
+    layout->addWidget(m_plotSprayMeasurements);
+
     m_result = new QLabel(QStringLiteral("Select a robot and enter joint vectors."), this);
     m_result->setWordWrap(true);
     layout->addWidget(m_result);
@@ -455,6 +568,12 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
     });
     connect(m_sprayRangeVisible, &QCheckBox::toggled,
         this, &MotionPlanningEditorWidget::sprayRangeVisibilityChanged);
+    connect(m_sprayMeasurementEnabled, &QCheckBox::toggled,
+        this, &MotionPlanningEditorWidget::sprayMeasurementEnabledChanged);
+    connect(m_exportSprayMeasurements, &QPushButton::clicked,
+        this, &MotionPlanningEditorWidget::exportSprayMeasurementsRequested);
+    connect(m_plotSprayMeasurements, &QPushButton::clicked,
+        this, &MotionPlanningEditorWidget::plotSprayMeasurementsRequested);
     connect(m_applyCdfJointButton, &QPushButton::clicked, this, [this]() {
         emit applySelectedCdfJointAnglesRequested(selectedOriginalPointIndex(m_cdfJointTable));
     });
@@ -541,6 +660,35 @@ void MotionPlanningEditorWidget::setPlaybackActive(bool active)
             : QStringLiteral("Play IK result"));
     }
     updateTrajectoryActions();
+}
+
+void MotionPlanningEditorWidget::setSprayMeasurementText(const QString& text)
+{
+    m_sprayMeasurement->setText(text);
+}
+
+void MotionPlanningEditorWidget::setSprayRecordingState(bool hasSamples, bool active, bool exportPending)
+{
+    m_exportSprayMeasurements->setEnabled(!exportPending);
+    m_exportSprayMeasurements->setText(exportPending
+        ? QStringLiteral("\u7b49\u5f85\u64ad\u653e\u7ed3\u675f\u540e\u5bfc\u51fa...")
+        : QStringLiteral("\u5bfc\u51fa\u55b7\u6d82\u8ddd\u79bb\u548c\u55b7\u6d82\u89d2\u5ea6"));
+    m_plotSprayMeasurements->setEnabled(hasSamples && !active);
+}
+
+void MotionPlanningEditorWidget::showSprayMeasurementPlot(
+    const QVector<double>& distancesMm, const QVector<double>& anglesDegrees, const QString& title)
+{
+    auto* dialog = new QDialog(this, Qt::Window);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowTitle(title);
+    auto* layout = new QVBoxLayout(dialog);
+    layout->addWidget(new SprayCurveWidget(distancesMm, QStringLiteral("Spray distance (mm)"),
+        QColor(0, 145, 160), dialog), 1);
+    layout->addWidget(new SprayCurveWidget(anglesDegrees, QStringLiteral("Spray angle (deg)"),
+        QColor(205, 80, 85), dialog), 1);
+    dialog->resize(760, 600);
+    dialog->show();
 }
 
 void MotionPlanningEditorWidget::setJointDefaults(
