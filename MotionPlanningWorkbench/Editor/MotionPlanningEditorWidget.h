@@ -115,6 +115,7 @@ signals:
     void playbackRequested(double durationSeconds);
     void playbackStopRequested();
     void sprayRangeVisibilityChanged(bool visible);
+    void endEffectorTraceVisibilityChanged(bool visible);
     void sprayMeasurementEnabledChanged(bool enabled);
     void exportSprayMeasurementsRequested();
     void plotSprayMeasurementsRequested();
@@ -139,6 +140,7 @@ private:
     QDoubleSpinBox* m_playbackDuration = nullptr;
     QPushButton* m_playbackButton = nullptr;
     QCheckBox* m_sprayRangeVisible = nullptr;
+    QCheckBox* m_endEffectorTraceVisible = nullptr;
     QCheckBox* m_sprayMeasurementEnabled = nullptr;
     QLabel* m_sprayMeasurement = nullptr;
     QPushButton* m_exportSprayMeasurements = nullptr;

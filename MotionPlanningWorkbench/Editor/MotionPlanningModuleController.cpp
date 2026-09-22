@@ -488,6 +488,8 @@ namespace robot_qt_viewer
             this, &MotionPlanningModuleController::stopJointPlayback);
         connect(&m_widget, &MotionPlanningEditorWidget::sprayRangeVisibilityChanged,
             this, &MotionPlanningModuleController::setSprayRangeVisible);
+        connect(&m_widget, &MotionPlanningEditorWidget::endEffectorTraceVisibilityChanged,
+            this, &MotionPlanningModuleController::setEndEffectorTraceVisible);
         connect(&m_widget, &MotionPlanningEditorWidget::sprayMeasurementEnabledChanged,
             this, &MotionPlanningModuleController::setSprayMeasurementEnabled);
         connect(&m_widget, &MotionPlanningEditorWidget::exportSprayMeasurementsRequested,
@@ -557,11 +559,14 @@ namespace robot_qt_viewer
         } else if(event.kind == RobotQtViewerEventKind::ProjectOpened) {
             stopJointPlayback();
             clearSprayMeasurements();
+            clearEndEffectorTrace();
             setSelectedRobot(m_context.selectionModel().state().robotId);
             ensurePersistentCdfCollisionSetup();
             refreshTrajectoryView();
         } else if(event.kind == RobotQtViewerEventKind::ProjectDocumentChanged) {
             setSprayRangeVisible(m_sprayRangeVisible);
+            clearEndEffectorTrace();
+            setEndEffectorTraceVisible(m_endEffectorTraceVisible);
             refreshTrajectoryView();
         }
     }
@@ -1462,6 +1467,8 @@ namespace robot_qt_viewer
             }
         }
 
+        clearEndEffectorTrace();
+        setEndEffectorTraceVisible(m_endEffectorTraceVisible);
         m_playbackPointIndex = 0;
         m_spraySamples.clear();
         m_spraySamples.reserve(selectedPlan->trajectory.points.size());
@@ -1545,6 +1552,12 @@ namespace robot_qt_viewer
             return;
         }
 
+        // Sample only after every joint in this playback point has been applied.
+        if(m_endEffectorTraceVisible) {
+            if(auto* services = m_context.viewportServices()) {
+                services->appendEndEffectorTraceSample();
+            }
+        }
         if(m_sprayMeasurementEnabled) {
             SprayMeasurementSample spraySample;
             spraySample.pointIndex = m_playbackPointIndex;
@@ -1588,6 +1601,7 @@ namespace robot_qt_viewer
         stopJointPlayback();
         m_selectedTrajectoryId = trajectoryId;
         clearSprayMeasurements();
+        clearEndEffectorTrace();
         refreshTrajectoryView();
     }
 
@@ -1596,9 +1610,11 @@ namespace robot_qt_viewer
         if(m_selectedRobotId != robotId) {
             stopJointPlayback();
             clearSprayMeasurements();
+            clearEndEffectorTrace();
         }
         m_selectedRobotId = robotId;
         setSprayRangeVisible(m_sprayRangeVisible);
+        setEndEffectorTraceVisible(m_endEffectorTraceVisible);
         m_widget.setRobotId(robotId);
         if(robotId.isEmpty()) {
             refreshTrajectoryView();
@@ -1630,6 +1646,21 @@ namespace robot_qt_viewer
         m_sprayRangeVisible = visible;
         if(RobotQtViewerViewportServices* viewportServices = m_context.viewportServices()) {
             viewportServices->setSprayRangeVisible(m_selectedRobotId, visible);
+        }
+    }
+
+    void MotionPlanningModuleController::setEndEffectorTraceVisible(bool visible)
+    {
+        m_endEffectorTraceVisible = visible;
+        if(auto* services = m_context.viewportServices()) {
+            services->setEndEffectorTraceVisible(m_selectedRobotId, visible);
+        }
+    }
+
+    void MotionPlanningModuleController::clearEndEffectorTrace()
+    {
+        if(auto* services = m_context.viewportServices()) {
+            services->clearEndEffectorTrace();
         }
     }
 

@@ -437,6 +437,13 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
     m_sprayRangeVisible = new QCheckBox(QStringLiteral("Show spray range"), basicPage);
     layout->addWidget(m_sprayRangeVisible);
 
+    m_endEffectorTraceVisible = new QCheckBox(
+        QStringLiteral("\u663e\u793a\u672b\u7aef\u8f68\u8ff9"), basicPage);
+    m_endEffectorTraceVisible->setObjectName(QStringLiteral("endEffectorTraceVisible"));
+    m_endEffectorTraceVisible->setToolTip(QStringLiteral(
+        "Trace the spray cone tip during playback. Restarting playback or unchecking clears the trace."));
+    layout->addWidget(m_endEffectorTraceVisible);
+
     m_sprayMeasurementEnabled = new QCheckBox(
         QStringLiteral("Calculate spray distance and angle"), basicPage);
     m_sprayMeasurementEnabled->setObjectName(QStringLiteral("sprayMeasurementEnabled"));
@@ -568,6 +575,8 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
     });
     connect(m_sprayRangeVisible, &QCheckBox::toggled,
         this, &MotionPlanningEditorWidget::sprayRangeVisibilityChanged);
+    connect(m_endEffectorTraceVisible, &QCheckBox::toggled,
+        this, &MotionPlanningEditorWidget::endEffectorTraceVisibilityChanged);
     connect(m_sprayMeasurementEnabled, &QCheckBox::toggled,
         this, &MotionPlanningEditorWidget::sprayMeasurementEnabledChanged);
     connect(m_exportSprayMeasurements, &QPushButton::clicked,

@@ -62,6 +62,8 @@ namespace robot_qt_viewer
         void stopJointPlayback();
         void advanceJointPlayback();
         void setSprayRangeVisible(bool visible);
+        void setEndEffectorTraceVisible(bool visible);
+        void clearEndEffectorTrace();
         void setSprayMeasurementEnabled(bool enabled);
         void updateSprayMeasurement();
         void exportSprayMeasurements();
@@ -104,6 +106,7 @@ namespace robot_qt_viewer
         int m_playbackInvalidSamples = 0;
         bool m_playbackFinishedNaturally = false;
         bool m_sprayRangeVisible = false;
+        bool m_endEffectorTraceVisible = false;
         bool m_sprayMeasurementEnabled = true;
         struct SprayMeasurementSample
         {
