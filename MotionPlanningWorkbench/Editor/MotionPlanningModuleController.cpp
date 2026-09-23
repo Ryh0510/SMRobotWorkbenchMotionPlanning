@@ -472,6 +472,13 @@ namespace robot_qt_viewer
             this, &MotionPlanningModuleController::applySelectedCdfJointAngles);
         connect(&m_widget, &MotionPlanningEditorWidget::repairImportedCdfTrajectoryRequested,
             this, &MotionPlanningModuleController::repairImportedCdfTrajectory);
+        connect(&m_widget, &MotionPlanningEditorWidget::exportJointTrajectoryRequested,
+            this, [this]() { exportJointTrajectory(false); });
+        connect(&m_widget, &MotionPlanningEditorWidget::trajectoryPointsVisibilityChanged,
+            this, [this](bool visible) {
+                m_trajectoryPointsVisible = visible;
+                refreshTrajectoryView();
+            });
         connect(&m_widget, &MotionPlanningEditorWidget::exportCdfTrajectoryRequested,
             this, &MotionPlanningModuleController::exportCdfTrajectory);
         connect(&m_widget, &MotionPlanningEditorWidget::insertControlPointBeforeRequested,
@@ -804,7 +811,7 @@ namespace robot_qt_viewer
             : motion_planning::CartesianIkToolMode::Flange;
         options.maxIterations = 5000;
         options.tolerance = 1.0e-6;
-        options.stepSize = 0.01;
+        options.stepSize = 1.0;
         options.damping = 0.001;
 
         if(RobotQtViewerViewportServices* viewportServices = m_context.viewportServices()) {
@@ -822,6 +829,25 @@ namespace robot_qt_viewer
             }
         }
 
+        auto* viewportServices = m_context.viewportServices();
+        const auto runtimeFk = viewportServices
+            ? viewportServices->robotForwardKinematics(m_selectedRobotId, options.jointNames, useToolTransform)
+            : RobotQtViewerViewportServices::RobotForwardKinematics{};
+        if(!runtimeFk) {
+            m_widget.setResult(QStringLiteral("Cannot obtain the selected robot model and TCP for IK."), false);
+            return;
+        }
+        const bool mapSigns = usesIrb4600RobotSystemJointSigns(m_context.document(), m_selectedRobotId);
+        if(mapSigns) {
+            options.seedJoints = motion_planning::ProjectTrajectoryInverseKinematics::irb4600RobotSystemJointValues(
+                options.seedJoints);
+        }
+        options.worldForwardKinematics = [runtimeFk, mapSigns](const std::vector<double>& joints) {
+            return runtimeFk(mapSigns
+                ? motion_planning::ProjectTrajectoryInverseKinematics::irb4600RobotSystemJointValues(joints)
+                : joints);
+        };
+        stopJointPlayback();
         const motion_planning::CartesianIkResult ikResult =
             motion_planning::ProjectTrajectoryInverseKinematics::solveCartesianControlPoints(
                 m_context.document(),
@@ -1093,52 +1119,54 @@ namespace robot_qt_viewer
 
     void MotionPlanningModuleController::exportCdfTrajectory()
     {
-        if(m_selectedRobotId.isEmpty() || m_selectedTrajectoryId.isEmpty()) {
-            m_widget.setCdfResult(QStringLiteral("Run CDF/QP repair before exporting a trajectory."), false);
-            return;
-        }
+        exportJointTrajectory(true);
+    }
 
-        const std::vector<motion_planning::StoredMotionPlan> plans =
-            motion_planning::MotionPlanningProjectStore::plans(m_context.document());
-        const motion_planning::StoredMotionPlan* selectedPlan =
-            findMotionPlan(plans, m_selectedRobotId, m_selectedTrajectoryId);
-        if(selectedPlan == nullptr || !isCdfQpTrajectory(*selectedPlan)) {
-            m_widget.setCdfResult(
-                QStringLiteral("Select a trajectory produced by OMPL + CDF/QP repair before exporting."),
-                false);
+    void MotionPlanningModuleController::exportJointTrajectory(bool cdfOnly)
+    {
+        const auto showResult = [this, cdfOnly](const QString& message, bool success) {
+            if(cdfOnly) { m_widget.setCdfResult(message, success); }
+            else { m_widget.setResult(message, success); }
+            emit statusMessageRequested(message, 6000);
+        };
+        const auto plans = motion_planning::MotionPlanningProjectStore::plans(m_context.document());
+        const auto* selectedPlan = findMotionPlan(plans, m_selectedRobotId, m_selectedTrajectoryId);
+        if(selectedPlan == nullptr || selectedPlan->trajectory.empty() || selectedPlan->jointNames.empty()) {
+            showResult(QStringLiteral("Select a solved joint trajectory before exporting."), false);
             return;
         }
-        if(selectedPlan->jointNames.size() != selectedPlan->trajectory.points.front().q.size()) {
-            m_widget.setCdfResult(
-                QStringLiteral("The repaired trajectory joint names do not match its joint values."),
-                false);
+        if(cdfOnly && !isCdfQpTrajectory(*selectedPlan)) {
+            showResult(QStringLiteral("Select a trajectory produced by OMPL + CDF/QP repair before exporting."), false);
             return;
         }
-
-        const QString defaultFileName =
-            QStringLiteral("%1_ompl_cdf_qp_trajectory.txt").arg(m_selectedRobotId);
-        QString outputPath = robot_qt_viewer::getSaveFileName(
-            QStringLiteral("motionPlanning.cdfTrajectory.save"),
+        // Validate every source row, including rows omitted from the sampled UI table.
+        for(const auto& point : selectedPlan->trajectory.points) {
+            if(point.q.size() != selectedPlan->jointNames.size() || !std::isfinite(point.time) ||
+                !std::all_of(point.q.begin(), point.q.end(), [](double q) {
+                    return std::isfinite(q) && std::isfinite(q * 180.0 / kPi);
+                })) {
+                showResult(QStringLiteral("The trajectory contains an invalid joint row."), false);
+                return;
+            }
+        }
+        QString outputPath = getSaveFileName(
+            cdfOnly ? QStringLiteral("motionPlanning.cdfTrajectory.save")
+                    : QStringLiteral("motionPlanning.jointTrajectory.save"),
             &m_widget,
-            QStringLiteral("Export OMPL + CDF/QP trajectory"),
-            defaultFileName,
+            cdfOnly ? QStringLiteral("Export OMPL + CDF/QP trajectory")
+                    : QStringLiteral("\u5bfc\u51fa\u5173\u8282\u8f68\u8ff9"),
+            cdfOnly ? QStringLiteral("%1_ompl_cdf_qp_trajectory.txt").arg(m_selectedRobotId)
+                    : QStringLiteral("ik_joint_angles.txt"),
             QStringLiteral("Text Files (*.txt);;All Files (*)"));
-        if(outputPath.isEmpty()) {
-            return;
-        }
+        if(outputPath.isEmpty()) { return; }
         if(!outputPath.endsWith(QStringLiteral(".txt"), Qt::CaseInsensitive)) {
             outputPath += QStringLiteral(".txt");
         }
-
         QSaveFile file(outputPath);
         if(!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-            const QString message = QStringLiteral("Failed to open trajectory export file: %1")
-                .arg(file.errorString());
-            m_widget.setCdfResult(message, false);
-            emit statusMessageRequested(message, 6000);
+            showResult(QStringLiteral("Failed to open trajectory export file: %1").arg(file.errorString()), false);
             return;
         }
-
         QTextStream text(&file);
         text.setLocale(QLocale::c());
         text.setRealNumberNotation(QTextStream::FixedNotation);
@@ -1151,36 +1179,21 @@ namespace robot_qt_viewer
             text << '\t' << "J" << static_cast<qulonglong>(index + 1) << "_deg";
         }
         text << '\n';
-
-        for(const robottrajectory::TimedJointPoint& point : selectedPlan->trajectory.points) {
-            if(point.q.size() != selectedPlan->jointNames.size()) {
-                const QString message =
-                    QStringLiteral("The repaired trajectory contains an invalid joint row.");
-                m_widget.setCdfResult(message, false);
-                emit statusMessageRequested(message, 6000);
-                return;
-            }
-
+        for(const auto& point : selectedPlan->trajectory.points) {
             text << point.time;
-            for(const double jointValueRadians : point.q) {
+            for(double jointValueRadians : point.q) {
+                // Export stored IK convention, before any runtime joint-sign mapping.
                 text << '\t' << (jointValueRadians * 180.0 / kPi);
             }
             text << '\n';
         }
-
-        if(!file.commit()) {
-            const QString message = QStringLiteral("Failed to save trajectory export: %1")
-                .arg(file.errorString());
-            m_widget.setCdfResult(message, false);
-            emit statusMessageRequested(message, 6000);
+        text.flush();
+        if(text.status() != QTextStream::Ok || !file.commit()) {
+            showResult(QStringLiteral("Failed to save trajectory export: %1").arg(file.errorString()), false);
             return;
         }
-
-        const QString summary = QStringLiteral("Exported %1 optimized joint angle points to %2")
-            .arg(static_cast<int>(selectedPlan->trajectory.points.size()))
-            .arg(outputPath);
-        m_widget.setCdfResult(summary, true);
-        emit statusMessageRequested(summary, 6000);
+        showResult(QStringLiteral("Exported %1 joint angle points to %2")
+            .arg(static_cast<qulonglong>(selectedPlan->trajectory.points.size())).arg(outputPath), true);
     }
 
     void MotionPlanningModuleController::insertControlPointBefore(int pointIndex)
@@ -1888,9 +1901,9 @@ namespace robot_qt_viewer
             if(selectedPlan != nullptr && !selectedPlan->cartesianControlPoints.empty()) {
                 viewportServices->setTrajectoryControlPointOverlay(
                     QString::fromStdString(selectedPlan->id),
-                    cartesianControlPointTransforms(*selectedPlan));
+                    cartesianControlPointTransforms(*selectedPlan), m_trajectoryPointsVisible);
             } else {
-            viewportServices->clearTrajectoryControlPointOverlay();
+                viewportServices->clearTrajectoryControlPointOverlay();
             }
         }
     }

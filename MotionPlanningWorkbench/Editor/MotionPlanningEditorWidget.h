@@ -114,6 +114,8 @@ signals:
     void editControlPointRequested(int pointIndex);
     void playbackRequested(double durationSeconds);
     void playbackStopRequested();
+    void exportJointTrajectoryRequested();
+    void trajectoryPointsVisibilityChanged(bool visible);
     void sprayRangeVisibilityChanged(bool visible);
     void endEffectorTraceVisibilityChanged(bool visible);
     void sprayMeasurementEnabledChanged(bool enabled);
@@ -136,6 +138,8 @@ private:
     QPushButton* m_importButton = nullptr;
     QComboBox* m_ikToolMode = nullptr;
     QPushButton* m_solveIkButton = nullptr;
+    QPushButton* m_exportJointTrajectoryButton = nullptr;
+    QCheckBox* m_trajectoryPointsVisible = nullptr;
     QPushButton* m_applyJointPointButton = nullptr;
     QDoubleSpinBox* m_playbackDuration = nullptr;
     QPushButton* m_playbackButton = nullptr;

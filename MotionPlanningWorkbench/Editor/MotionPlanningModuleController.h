@@ -54,6 +54,7 @@ namespace robot_qt_viewer
         void applySelectedCdfJointAngles(int pointIndex);
         void repairImportedCdfTrajectory();
         void exportCdfTrajectory();
+        void exportJointTrajectory(bool cdfOnly);
         void insertControlPointBefore(int pointIndex);
         void insertControlPointAfter(int pointIndex);
         void deleteControlPoint(int pointIndex);
@@ -107,6 +108,7 @@ namespace robot_qt_viewer
         bool m_playbackFinishedNaturally = false;
         bool m_sprayRangeVisible = false;
         bool m_endEffectorTraceVisible = false;
+        bool m_trajectoryPointsVisible = false;
         bool m_sprayMeasurementEnabled = true;
         struct SprayMeasurementSample
         {

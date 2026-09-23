@@ -379,6 +379,11 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
     m_importButton = new QPushButton(QStringLiteral("Import trajectory..."), this);
     layout->addWidget(m_importButton);
 
+    m_trajectoryPointsVisible = new QCheckBox(
+        QStringLiteral("\u663e\u793a\u8f68\u8ff9\u70b9"), basicPage);
+    m_trajectoryPointsVisible->setObjectName(QStringLiteral("trajectoryPointsVisible"));
+    layout->addWidget(m_trajectoryPointsVisible);
+
     auto* ikForm = new QFormLayout();
     ikForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     m_ikToolMode = new QComboBox(this);
@@ -422,6 +427,11 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
 
     m_applyJointPointButton = new QPushButton(QStringLiteral("Apply selected joint point"), this);
     layout->addWidget(m_applyJointPointButton);
+
+    m_exportJointTrajectoryButton = new QPushButton(
+        QStringLiteral("\u5bfc\u51fa\u5173\u8282\u8f68\u8ff9"), basicPage);
+    m_exportJointTrajectoryButton->setObjectName(QStringLiteral("exportJointTrajectory"));
+    layout->addWidget(m_exportJointTrajectoryButton);
 
     auto* playbackLayout = new QHBoxLayout();
     playbackLayout->setSpacing(6);
@@ -573,6 +583,10 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
             emit playbackRequested(m_playbackDuration != nullptr ? m_playbackDuration->value() : 5.0);
         }
     });
+    connect(m_exportJointTrajectoryButton, &QPushButton::clicked,
+        this, &MotionPlanningEditorWidget::exportJointTrajectoryRequested);
+    connect(m_trajectoryPointsVisible, &QCheckBox::toggled,
+        this, &MotionPlanningEditorWidget::trajectoryPointsVisibilityChanged);
     connect(m_sprayRangeVisible, &QCheckBox::toggled,
         this, &MotionPlanningEditorWidget::sprayRangeVisibilityChanged);
     connect(m_endEffectorTraceVisible, &QCheckBox::toggled,
@@ -906,6 +920,9 @@ void MotionPlanningEditorWidget::updateTrajectoryActions()
     }
     if(m_applyJointPointButton != nullptr) {
         m_applyJointPointButton->setEnabled(hasRobot && hasJoint && hasValidJointRow);
+    }
+    if(m_exportJointTrajectoryButton != nullptr) {
+        m_exportJointTrajectoryButton->setEnabled(hasRobot && hasJoint && hasAnyJointRow);
     }
     if(m_playbackDuration != nullptr) {
         m_playbackDuration->setEnabled(!m_playbackActive && hasRobot && hasJoint && hasAnyJointRow);
