@@ -395,6 +395,45 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
     m_solveIkButton = new QPushButton(QStringLiteral("Solve IK and apply"), this);
     layout->addWidget(m_solveIkButton);
 
+    m_allIkButton = new QPushButton(QStringLiteral("\u5168\u9006\u89e3"), basicPage);
+    m_allIkButton->setObjectName(QStringLiteral("solveAllIk"));
+    layout->addWidget(m_allIkButton);
+    connect(m_allIkButton, &QPushButton::clicked, this, [this]() {
+        if(m_multiIkBusy) { emit multiIkCancelRequested(); return; }
+        QDialog dialog(this);
+        dialog.setWindowTitle(QStringLiteral("\u5168\u9006\u89e3 - \u641c\u7d22\u8bbe\u7f6e"));
+        auto* form = new QFormLayout(&dialog);
+        auto* note = new QLabel(QStringLiteral(
+            "\u591a\u521d\u503c\u6570\u503c\u641c\u7d22\uff0c\u4e0d\u4fdd\u8bc1\u627e\u5168\u6240\u6709\u5206\u652f\u3002\n"
+            "\u5404\u8f74\u8303\u56f4\u5355\u4f4d\u4e3a\u5ea6\uff0c\u4e0e\u6a21\u578b\u5df2\u77e5\u9650\u4f4d\u53d6\u4ea4\u96c6\u3002\n"
+            "continuous \u8f74\u7684\u641c\u7d22\u7a97\u53e3\u4e0d\u4ee3\u8868\u771f\u5b9e\u673a\u68b0\u9650\u4f4d\u3002\n"
+            "\u6269\u5927\u8303\u56f4\u53ef\u679a\u4e3e\u591a\u5708\u89e3\uff1b\u6bcf\u70b9\u6700\u591a\u4fdd\u7559 512 \u7ec4\u3002"), &dialog);
+        form->addRow(note);
+        QVector<QDoubleSpinBox*> lows, highs;
+        for(int j = 0; j < 6; ++j) {
+            auto* row = new QHBoxLayout;
+            auto* low = new QDoubleSpinBox(&dialog);
+            auto* high = new QDoubleSpinBox(&dialog);
+            for(auto* box : {low, high}) { box->setRange(-3600, 3600); box->setDecimals(2); row->addWidget(box); }
+            low->setValue(-180); high->setValue(180);
+            lows.push_back(low); highs.push_back(high);
+            form->addRow(QStringLiteral("J%1 min / max (deg)").arg(j + 1), row);
+        }
+        auto* seeds = new QSpinBox(&dialog);
+        seeds->setRange(8, 1024); seeds->setValue(64);
+        form->addRow(QStringLiteral("\u6bcf\u70b9\u5206\u6563\u521d\u503c\u6570"), seeds);
+        auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+        form->addRow(buttons);
+        connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        if(dialog.exec() != QDialog::Accepted) { return; }
+        QVector<double> lower, upper;
+        for(int j = 0; j < 6; ++j) { lower.push_back(lows[j]->value()); upper.push_back(highs[j]->value()); }
+        emit multiIkRequested(m_ikToolMode->currentData().toBool(), lower, upper, seeds->value());
+    });
+    connect(m_ikToolMode, QOverload<int>::of(&QComboBox::currentIndexChanged),
+        this, [this](int) { emit multiIkTargetChanged(); });
+
     m_trajectoryCombo = new QComboBox(this);
     robot_qt_viewer::makeHorizontallyCompressible(m_trajectoryCombo);
     layout->addWidget(m_trajectoryCombo);
@@ -443,6 +482,57 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
     playbackLayout->addWidget(m_playbackDuration);
     playbackLayout->addWidget(m_playbackButton);
     layout->addLayout(playbackLayout);
+
+    auto* multiTitle = new QLabel(QStringLiteral("\u591a\u89e3\u5173\u8282\u8f68\u8ff9"), basicPage);
+    multiTitle->setProperty("panelTitle", true);
+    layout->addWidget(multiTitle);
+    m_multiIkStatus = new QLabel(QStringLiteral("\u70b9\u51fb\u5168\u9006\u89e3\u751f\u6210\u5019\u9009\u3002"), basicPage);
+    m_multiIkStatus->setObjectName(QStringLiteral("multiIkStatus"));
+    m_multiIkStatus->setWordWrap(true);
+    layout->addWidget(m_multiIkStatus);
+    m_multiIkPoint = new QComboBox(basicPage);
+    m_multiIkPoint->setObjectName(QStringLiteral("multiIkPoint"));
+    robot_qt_viewer::makeHorizontallyCompressible(m_multiIkPoint);
+    layout->addWidget(m_multiIkPoint);
+    m_multiIkTable = new QTableWidget(basicPage);
+    m_multiIkTable->setObjectName(QStringLiteral("multiIkCandidates"));
+    configureTrajectoryTable(m_multiIkTable, {QStringLiteral("\u89e3 / \u64ad\u653e"),
+        QStringLiteral("J1 deg"), QStringLiteral("J2 deg"), QStringLiteral("J3 deg"),
+        QStringLiteral("J4 deg"), QStringLiteral("J5 deg"), QStringLiteral("J6 deg"),
+        QStringLiteral("turn J1..J6"), QStringLiteral("error mm"), QStringLiteral("error deg")}, 150);
+    m_multiIkTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    layout->addWidget(m_multiIkTable);
+    m_multiIkApply = new QPushButton(QStringLiteral("\u5355\u70b9\u5e94\u7528\u6240\u9009\u89e3"), basicPage);
+    m_multiIkApply->setObjectName(QStringLiteral("multiIkApply"));
+    m_multiIkSelect = new QPushButton(QStringLiteral("\u8bbe\u4e3a\u8be5\u70b9\u64ad\u653e\u89e3"), basicPage);
+    m_multiIkContinue = new QPushButton(QStringLiteral("\u4ece\u6240\u9009\u89e3\u5c31\u8fd1\u9009\u53d6\u540e\u7eed\u89e3"), basicPage);
+    layout->addWidget(m_multiIkApply);
+    layout->addWidget(m_multiIkSelect);
+    layout->addWidget(m_multiIkContinue);
+    auto* multiPlayback = new QHBoxLayout;
+    m_multiIkDuration = new QDoubleSpinBox(basicPage);
+    m_multiIkDuration->setRange(0.1, 3600); m_multiIkDuration->setValue(5); m_multiIkDuration->setSuffix(QStringLiteral(" s"));
+    m_multiIkPlay = new QPushButton(QStringLiteral("\u52a8\u6001\u8fd0\u884c\u591a\u89e3\u9009\u5b9a\u8f68\u8ff9"), basicPage);
+    m_multiIkPlay->setObjectName(QStringLiteral("multiIkPlay"));
+    m_multiIkPlay->setToolTip(QStringLiteral("\u6bcf\u70b9\u4f7f\u7528\u6807\u8bb0\u7684\u4e00\u7ec4\u89e3\u3002\u4ec5\u7528\u4e8e\u9010\u70b9\u8c03\u8bd5\uff0c\u672a\u8fdb\u884c\u907f\u969c\u89c4\u5212\u3002"));
+    multiPlayback->addWidget(m_multiIkDuration); multiPlayback->addWidget(m_multiIkPlay);
+    layout->addLayout(multiPlayback);
+    connect(m_multiIkPoint, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+        [this](int point) { emit multiIkPointChanged(point); });
+    connect(m_multiIkTable, &QTableWidget::itemSelectionChanged, this, &MotionPlanningEditorWidget::updateTrajectoryActions);
+    connect(m_multiIkApply, &QPushButton::clicked, this, [this]() {
+        emit multiIkApplyRequested(m_multiIkPoint->currentIndex(), m_multiIkTable->currentRow());
+    });
+    connect(m_multiIkSelect, &QPushButton::clicked, this, [this]() {
+        emit multiIkSelectRequested(m_multiIkPoint->currentIndex(), m_multiIkTable->currentRow(), false);
+    });
+    connect(m_multiIkContinue, &QPushButton::clicked, this, [this]() {
+        emit multiIkSelectRequested(m_multiIkPoint->currentIndex(), m_multiIkTable->currentRow(), true);
+    });
+    connect(m_multiIkPlay, &QPushButton::clicked, this, [this]() {
+        if(m_playbackActive) { emit playbackStopRequested(); }
+        else { emit multiIkPlaybackRequested(m_multiIkDuration->value()); }
+    });
 
     m_sprayRangeVisible = new QCheckBox(QStringLiteral("Show spray range"), basicPage);
     layout->addWidget(m_sprayRangeVisible);
@@ -912,11 +1002,23 @@ void MotionPlanningEditorWidget::updateTrajectoryActions()
     const bool hasValidJointRow = selectedOriginalPointIndex(m_jointTable) >= 0;
     const bool hasAnyJointRow = hasAnyOriginalPointRow(m_jointTable);
 
+    if(m_allIkButton) {
+        m_allIkButton->setEnabled(m_multiIkBusy || (hasRobot && hasCartesian && !m_playbackActive));
+        m_ikToolMode->setEnabled(!m_multiIkBusy);
+        const bool candidate = !m_multiIkBusy && m_multiIkTable->currentRow() >= 0;
+        m_multiIkApply->setEnabled(candidate);
+        m_multiIkSelect->setEnabled(candidate && !m_playbackActive);
+        m_multiIkContinue->setEnabled(candidate && !m_playbackActive);
+        m_multiIkPlay->setEnabled(m_playbackActive || (!m_multiIkBusy && m_multiIkComplete));
+        m_multiIkDuration->setEnabled(!m_playbackActive && !m_multiIkBusy);
+        m_multiIkPlay->setText(m_playbackActive ? QStringLiteral("Stop playback") :
+            QStringLiteral("\u52a8\u6001\u8fd0\u884c\u591a\u89e3\u9009\u5b9a\u8f68\u8ff9"));
+    }
     if(m_ikToolMode != nullptr) {
-        m_ikToolMode->setEnabled(hasRobot && hasCartesian);
+        m_ikToolMode->setEnabled(hasRobot && hasCartesian && !m_multiIkBusy);
     }
     if(m_solveIkButton != nullptr) {
-        m_solveIkButton->setEnabled(hasRobot && hasCartesian);
+        m_solveIkButton->setEnabled(hasRobot && hasCartesian && !m_multiIkBusy);
     }
     if(m_applyJointPointButton != nullptr) {
         m_applyJointPointButton->setEnabled(hasRobot && hasJoint && hasValidJointRow);
@@ -1015,4 +1117,43 @@ void MotionPlanningEditorWidget::showControlPointContextMenu(const QPoint& pos)
     } else if(selectedAction == remove) {
         emit deleteControlPointRequested(pointIndex);
     }
+}
+
+void MotionPlanningEditorWidget::setMultiIkPoints(const QVector<MultiIkPointRow>& points,
+    const QString& summary, bool complete)
+{
+    const QSignalBlocker blocker(m_multiIkPoint);
+    m_multiIkPoint->clear();
+    for(const auto& point : points) { m_multiIkPoint->addItem(point.label); }
+    m_multiIkStatus->setText(summary);
+    m_multiIkComplete = complete;
+    m_multiIkTable->setRowCount(0);
+    updateTrajectoryActions();
+}
+
+void MotionPlanningEditorWidget::setMultiIkCandidates(const QVector<MultiIkCandidateRow>& rows, int selected)
+{
+    m_multiIkTable->setUpdatesEnabled(false);
+    m_multiIkTable->setRowCount(rows.size());
+    for(int r = 0; r < rows.size(); ++r) {
+        for(int c = 0; c < rows[r].columns.size(); ++c) {
+            m_multiIkTable->setItem(r, c, new QTableWidgetItem(rows[r].columns[c]));
+        }
+    }
+    if(selected >= 0 && selected < rows.size()) { m_multiIkTable->selectRow(selected); }
+    m_multiIkTable->setUpdatesEnabled(true);
+    updateTrajectoryActions();
+}
+
+void MotionPlanningEditorWidget::setMultiIkBusy(bool busy, const QString& message)
+{
+    m_multiIkBusy = busy;
+    m_multiIkStatus->setText(message);
+    m_allIkButton->setText(busy ? QStringLiteral("\u53d6\u6d88\u5168\u9006\u89e3") : QStringLiteral("\u5168\u9006\u89e3"));
+    updateTrajectoryActions();
+}
+
+void MotionPlanningEditorWidget::setMultiIkPointLabel(int point, const QString& label)
+{
+    m_multiIkPoint->setItemText(point, label);
 }

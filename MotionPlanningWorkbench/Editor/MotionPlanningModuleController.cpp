@@ -5,6 +5,7 @@
 #include "RobotQtViewerDocumentController.h"
 #include "RobotQtViewerSelectionModel.h"
 #include "RobotQtViewerViewportServices.h"
+#include "RobotQtViewerViewportPreviewState.h"
 
 #include <RobotQtViewerFileDialog.h>
 #include <MotionPlanningCore/MotionPlanning.h>
@@ -22,6 +23,7 @@
 #include <QSaveFile>
 #include <QStringList>
 #include <QTimer>
+#include <QThread>
 #include <QTextStream>
 
 #include <algorithm>
@@ -464,6 +466,21 @@ namespace robot_qt_viewer
             this, &MotionPlanningModuleController::importTrajectory);
         connect(&m_widget, &MotionPlanningEditorWidget::importCdfJointAnglesRequested,
             this, &MotionPlanningModuleController::importCdfJointAngles);
+        connect(&m_widget, &MotionPlanningEditorWidget::multiIkRequested,
+            this, &MotionPlanningModuleController::solveMultiIk);
+        connect(&m_widget, &MotionPlanningEditorWidget::multiIkCancelRequested, this, [this]() {
+            if(m_multiIkCancel) { m_multiIkCancel->store(true); }
+        });
+        connect(&m_widget, &MotionPlanningEditorWidget::multiIkTargetChanged,
+            this, &MotionPlanningModuleController::invalidateMultiIk);
+        connect(&m_widget, &MotionPlanningEditorWidget::multiIkPointChanged,
+            this, &MotionPlanningModuleController::showMultiIkPoint);
+        connect(&m_widget, &MotionPlanningEditorWidget::multiIkApplyRequested,
+            this, &MotionPlanningModuleController::applyMultiIk);
+        connect(&m_widget, &MotionPlanningEditorWidget::multiIkSelectRequested,
+            this, &MotionPlanningModuleController::selectMultiIk);
+        connect(&m_widget, &MotionPlanningEditorWidget::multiIkPlaybackRequested,
+            this, &MotionPlanningModuleController::playMultiIk);
         connect(&m_widget, &MotionPlanningEditorWidget::inverseKinematicsRequested,
             this, &MotionPlanningModuleController::solveInverseKinematics);
         connect(&m_widget, &MotionPlanningEditorWidget::applySelectedJointPointRequested,
@@ -512,7 +529,11 @@ namespace robot_qt_viewer
         refreshTrajectoryView();
     }
 
-    MotionPlanningModuleController::~MotionPlanningModuleController() = default;
+    MotionPlanningModuleController::~MotionPlanningModuleController()
+    {
+        if(m_multiIkCancel) { m_multiIkCancel->store(true); }
+        if(m_multiIkThread) { m_multiIkThread->wait(); }
+    }
 
     void MotionPlanningModuleController::ensurePersistentCdfCollisionSetup()
     {
@@ -561,6 +582,25 @@ namespace robot_qt_viewer
 
     void MotionPlanningModuleController::handleEvent(const RobotQtViewerEvent& event)
     {
+        // Applying joints refreshes ToolSetup, which republishes pinned-frame display
+        // settings. Only geometric previews invalidate the FK used by multi IK.
+        bool kinematicPreviewChanged = false;
+        if(event.kind == RobotQtViewerEventKind::ViewportPreviewChanged) {
+            const auto& preview = m_context.viewportPreviewState().lastMutation();
+            kinematicPreviewChanged = preview.previewRobotBaseTransform ||
+                preview.previewRobotMountTransform || preview.upsertPreviewRobotMount ||
+                preview.removePreviewRobotMount || preview.upsertPreviewObjectFrame ||
+                preview.previewObjectFrameTransform || preview.previewSceneObjectTransform;
+        }
+        if(event.kind == RobotQtViewerEventKind::ProjectOpened ||
+            event.kind == RobotQtViewerEventKind::ToolSetupChanged ||
+            event.kind == RobotQtViewerEventKind::AttachmentChanged ||
+            kinematicPreviewChanged ||
+            (event.kind == RobotQtViewerEventKind::ProjectDocumentChanged &&
+             event.sourceId != QStringLiteral("motionPlanningMultiIkApply") &&
+             event.sourceId != QStringLiteral("motionPlanningPersistentCdfCollisionSetup"))) {
+            invalidateMultiIk();
+        }
         if(event.kind == RobotQtViewerEventKind::SelectionChanged) {
             setSelectedRobot(event.selection.robotId);
         } else if(event.kind == RobotQtViewerEventKind::ProjectOpened) {
@@ -1418,11 +1458,14 @@ namespace robot_qt_viewer
             m_widget.setResult(QStringLiteral("Select a solved joint trajectory before playback."), false);
             return;
         }
-        ensurePersistentCdfCollisionSetup();
+        // Multi-IK playback is an unplanned debug sequence. Do not synchronously
+        // build/enable a full collision scene merely to inspect configurations.
+        if(!m_multiIkPlayback) { ensurePersistentCdfCollisionSetup(); }
 
         const std::vector<motion_planning::StoredMotionPlan> plans =
             motion_planning::MotionPlanningProjectStore::plans(m_context.document());
         const motion_planning::StoredMotionPlan* selectedPlan =
+            m_multiIkPlayback ? m_multiIkPlayback.get() :
             findMotionPlan(plans, m_selectedRobotId, m_selectedTrajectoryId);
         if(selectedPlan == nullptr || selectedPlan->trajectory.empty()) {
             m_widget.setResult(QStringLiteral("Selected trajectory has no inverse kinematics joint values to play."), false);
@@ -1442,7 +1485,7 @@ namespace robot_qt_viewer
         m_playbackCollisionScene.reset();
 
         const motion_planning::ProjectCdfQpRepairOptions cdfOptions;
-        if(cdfDetectorIsConfigured(m_context.document(), m_selectedRobotId.toStdString(), cdfOptions)) {
+        if(!m_multiIkPlayback && cdfDetectorIsConfigured(m_context.document(), m_selectedRobotId.toStdString(), cdfOptions)) {
             if(RobotQtViewerViewportServices* viewportServices = m_context.viewportServices()) {
                 viewportServices->refreshCollisionConfiguration(
                     m_context.document(),
@@ -1457,7 +1500,7 @@ namespace robot_qt_viewer
 
         const std::vector<std::string> collisionDetectorIds =
             playbackCollisionDetectorIds(m_context.document(), m_selectedRobotId);
-        if(!collisionDetectorIds.empty()) {
+        if(!m_multiIkPlayback && !collisionDetectorIds.empty()) {
             motion_planning::ProjectPlanningRequest validationRequest;
             validationRequest.robotId = selectedPlan->robotId;
             validationRequest.jointNames = selectedPlan->jointNames;
@@ -1531,6 +1574,7 @@ namespace robot_qt_viewer
             }
         }
         m_widget.setSprayRecordingState(!m_spraySamples.empty(), false, m_sprayExportPending);
+        m_multiIkPlayback.reset();
     }
 
     void MotionPlanningModuleController::advanceJointPlayback()
@@ -1538,6 +1582,7 @@ namespace robot_qt_viewer
         const std::vector<motion_planning::StoredMotionPlan> plans =
             motion_planning::MotionPlanningProjectStore::plans(m_context.document());
         const motion_planning::StoredMotionPlan* selectedPlan =
+            m_multiIkPlayback ? m_multiIkPlayback.get() :
             findMotionPlan(plans, m_selectedRobotId, m_selectedTrajectoryId);
         if(selectedPlan == nullptr || selectedPlan->trajectory.empty()) {
             stopJointPlayback();
@@ -1611,6 +1656,7 @@ namespace robot_qt_viewer
         if(m_selectedTrajectoryId == trajectoryId) {
             return;
         }
+        invalidateMultiIk();
         stopJointPlayback();
         m_selectedTrajectoryId = trajectoryId;
         clearSprayMeasurements();
@@ -1621,6 +1667,7 @@ namespace robot_qt_viewer
     void MotionPlanningModuleController::setSelectedRobot(const QString& robotId)
     {
         if(m_selectedRobotId != robotId) {
+            invalidateMultiIk();
             stopJointPlayback();
             clearSprayMeasurements();
             clearEndEffectorTrace();
@@ -2066,4 +2113,204 @@ namespace robot_qt_viewer
 
         return applyJointValuesToRobotRuntime(jointNames, jointValues, sourceId);
     }
+}
+
+namespace robot_qt_viewer
+{
+
+    void MotionPlanningModuleController::invalidateMultiIk()
+    {
+        if(m_multiIkCancel) { m_multiIkCancel->store(true); }
+        if(m_multiIkPlayback) { stopJointPlayback(); }
+        m_multiIkResult.reset();
+        m_multiIkSelections.clear();
+        m_widget.setMultiIkPoints({}, QStringLiteral("\u8bf7\u5bf9\u5f53\u524d\u672b\u7aef\u8f68\u8ff9\u6267\u884c\u5168\u9006\u89e3\u3002"), false);
+    }
+
+    void MotionPlanningModuleController::solveMultiIk(bool useTool,
+        const QVector<double>& lowerDegrees, const QVector<double>& upperDegrees, int seeds)
+    {
+        if(m_multiIkThread) { return; }
+        const auto plans = motion_planning::MotionPlanningProjectStore::plans(m_context.document());
+        const auto* source = findMotionPlan(plans, m_selectedRobotId, m_selectedTrajectoryId);
+        if(!source || source->cartesianControlPoints.empty()) {
+            m_widget.setResult(QStringLiteral("Import/select cartesian control points first."), false); return;
+        }
+        motion_planning::CartesianMultiIkOptions options;
+        options.model.robotId = m_selectedRobotId.toStdString();
+        options.model.jointNames = selectedRobotJointNames(m_context.document(), m_selectedRobotId);
+        if(options.model.jointNames.size() != 6 || lowerDegrees.size() != 6 || upperDegrees.size() != 6) {
+            m_widget.setResult(QStringLiteral("Multi IK requires six revolute joints and six search ranges."), false); return;
+        }
+        auto* services = m_context.viewportServices();
+        auto fk = services ? services->robotForwardKinematics(m_selectedRobotId, options.model.jointNames, useTool) :
+            RobotQtViewerViewportServices::RobotForwardKinematics{};
+        if(!fk) { m_widget.setResult(QStringLiteral("Actual robot/TCP FK is unavailable."), false); return; }
+        const bool mapSigns = usesIrb4600RobotSystemJointSigns(m_context.document(), m_selectedRobotId);
+        for(int j = 0; j < 6; ++j) {
+            if(!std::isfinite(lowerDegrees[j]) || !std::isfinite(upperDegrees[j]) || lowerDegrees[j] > upperDegrees[j]) {
+                m_widget.setResult(QStringLiteral("Joint search minimum must not exceed maximum."), false); return;
+            }
+            options.lower.push_back(lowerDegrees[j] * kPi / 180);
+            options.upper.push_back(upperDegrees[j] * kPi / 180);
+            bool ok = false;
+            const double value = services->robotJointValue(m_selectedRobotId,
+                QString::fromStdString(options.model.jointNames[j]), &ok);
+            options.model.seedJoints.push_back(ok ? value : 0.0);
+        }
+        if(mapSigns) { options.model.seedJoints = motion_planning::ProjectTrajectoryInverseKinematics::irb4600RobotSystemJointValues(options.model.seedJoints); }
+        options.model.worldForwardKinematics = [fk, mapSigns](const auto& q) {
+            return fk(mapSigns ? motion_planning::ProjectTrajectoryInverseKinematics::irb4600RobotSystemJointValues(q) : q);
+        };
+        options.seedCount = seeds;
+        stopJointPlayback();
+        invalidateMultiIk();
+        auto cancel = std::make_shared<std::atomic_bool>(false);
+        m_multiIkCancel = cancel;
+        options.cancelled = [cancel]() { return cancel->load(); };
+        options.progress = [this, cancel](std::size_t done, std::size_t count) {
+            QMetaObject::invokeMethod(this, [this, cancel, done, count]() {
+                if(!cancel->load()) { m_widget.setMultiIkBusy(true,
+                    QStringLiteral("\u5168\u9006\u89e3\u8ba1\u7b97 %1 / %2").arg(static_cast<qulonglong>(done)).arg(static_cast<qulonglong>(count))); }
+            }, Qt::QueuedConnection);
+        };
+        auto output = std::make_shared<motion_planning::CartesianMultiIkResult>();
+        const auto document = m_context.document();
+        const auto basePath = projectBasePath(m_context.projectSession());
+        const auto plan = *source;
+        m_widget.setMultiIkBusy(true, QStringLiteral("\u6b63\u5728\u8bfb\u53d6\u6a21\u578b\u9650\u4f4d\u5e76\u641c\u7d22\u591a\u89e3..."));
+        m_multiIkThread = QThread::create([document, basePath, plan, options, output, mapSigns, cancel]() mutable {
+            try {
+                std::vector<double> lower, upper;
+                if(cancel->load()) { return; }
+                if(!motion_planning::ProjectTrajectoryInverseKinematics::readRevoluteJointLimits(
+                    document, basePath, options.model.robotId, options.model.jointNames, lower, upper, output->message)) { return; }
+                if(mapSigns) {
+                    lower = motion_planning::ProjectTrajectoryInverseKinematics::irb4600RobotSystemJointValues(lower);
+                    upper = motion_planning::ProjectTrajectoryInverseKinematics::irb4600RobotSystemJointValues(upper);
+                    for(std::size_t j = 0; j < lower.size(); ++j) { if(lower[j] > upper[j]) { std::swap(lower[j], upper[j]); } }
+                }
+                for(std::size_t j = 0; j < lower.size(); ++j) {
+                    options.lower[j] = std::max(options.lower[j], lower[j]);
+                    options.upper[j] = std::min(options.upper[j], upper[j]);
+                }
+                *output = motion_planning::ProjectTrajectoryInverseKinematics::solveAllCartesianControlPoints(plan, options);
+            } catch(const std::exception& error) { output->message = error.what(); }
+            catch(...) { output->message = "Multi IK failed unexpectedly."; }
+        });
+        m_multiIkThread->setParent(this);
+        connect(m_multiIkThread, &QThread::finished, this, [this, cancel, output]() {
+            m_multiIkThread->deleteLater();
+            m_multiIkThread = nullptr;
+            m_multiIkCancel.reset();
+            if(cancel->load()) {
+                m_widget.setMultiIkBusy(false, QStringLiteral("\u5168\u9006\u89e3\u5df2\u53d6\u6d88\uff0c\u672a\u4fdd\u7559\u4e0d\u5b8c\u6574\u8f68\u8ff9\u3002")); return;
+            }
+            m_multiIkResult = std::make_unique<motion_planning::CartesianMultiIkResult>(std::move(*output));
+            m_multiIkSelections.assign(m_multiIkResult->layers.size(), 0);
+            // Nearest numeric (unwrapped) choice is a debug default, not graph planning.
+            for(std::size_t i = 1; i < m_multiIkSelections.size(); ++i) {
+                const auto& previous = m_multiIkResult->layers[i - 1].candidates;
+                const auto& next = m_multiIkResult->layers[i].candidates;
+                if(previous.empty() || next.empty()) { continue; }
+                const auto& q = previous[m_multiIkSelections[i - 1]].joints;
+                double best = std::numeric_limits<double>::infinity();
+                for(std::size_t c = 0; c < next.size(); ++c) {
+                    double cost = 0;
+                    for(std::size_t j = 0; j < q.size(); ++j) { cost += std::pow(next[c].joints[j] - q[j], 2); }
+                    if(cost < best) { best = cost; m_multiIkSelections[i] = c; }
+                }
+            }
+            QVector<MotionPlanningEditorWidget::MultiIkPointRow> rows;
+            for(std::size_t i = 0; i < m_multiIkResult->layers.size(); ++i) { rows.push_back({multiIkPointLabel(i)}); }
+            const QString summary = QString::fromStdString(m_multiIkResult->message) +
+                QStringLiteral("\n\u89e3\u7f16\u53f7\u4ec5\u5728\u5f53\u524d\u70b9\u6709\u6548\uff1b\u89d2\u5ea6\u4e3a\u539f IK \u7b26\u53f7\u3002\u8c03\u8bd5\u64ad\u653e\u672a\u505a\u907f\u969c\u89c4\u5212\u3002");
+            m_widget.setMultiIkPoints(rows, summary, m_multiIkResult->success);
+            m_widget.setMultiIkBusy(false, summary);
+            showMultiIkPoint(0);
+        });
+        m_multiIkThread->start();
+    }
+
+    QString MotionPlanningModuleController::multiIkPointLabel(std::size_t point) const
+    {
+        const auto& layer = m_multiIkResult->layers[point];
+        return QStringLiteral("%1 | t=%2 | %3 \u7ec4 | \u64ad\u653e\u89e3: %4%5")
+            .arg(static_cast<qulonglong>(point + 1)).arg(layer.time, 0, 'g', 8)
+            .arg(static_cast<qulonglong>(layer.candidates.size()))
+            .arg(layer.candidates.empty() ? QStringLiteral("--") : QString::number(m_multiIkSelections[point] + 1))
+            .arg(layer.truncated ? QStringLiteral(" [\u5df2\u622a\u65ad]") : QString());
+    }
+
+    void MotionPlanningModuleController::showMultiIkPoint(int point)
+    {
+        QVector<MotionPlanningEditorWidget::MultiIkCandidateRow> rows;
+        if(!m_multiIkResult || point < 0 || point >= static_cast<int>(m_multiIkResult->layers.size())) {
+            m_widget.setMultiIkCandidates(rows, -1); return;
+        }
+        const auto& layer = m_multiIkResult->layers[point];
+        for(std::size_t c = 0; c < layer.candidates.size(); ++c) {
+            const auto& candidate = layer.candidates[c];
+            QStringList columns;
+            columns << QStringLiteral("%1%2").arg(static_cast<qulonglong>(c + 1))
+                .arg(c == m_multiIkSelections[point] ? QStringLiteral(" *") : QString());
+            for(double q : candidate.joints) { columns << QString::number(q * 180 / kPi, 'f', 5); }
+            QStringList turns;
+            for(int turn : candidate.turns) { turns << QString::number(turn); }
+            columns << turns.join(QStringLiteral(",")) << QString::number(candidate.positionError * 1000, 'g', 5)
+                << QString::number(candidate.orientationError * 180 / kPi, 'g', 5);
+            rows.push_back({columns});
+        }
+        m_widget.setMultiIkCandidates(rows, rows.empty() ? -1 : static_cast<int>(m_multiIkSelections[point]));
+    }
+
+    void MotionPlanningModuleController::selectMultiIk(int point, int candidate, bool continueFollowing)
+    {
+        if(!m_multiIkResult || point < 0 || point >= static_cast<int>(m_multiIkResult->layers.size()) ||
+            candidate < 0 || candidate >= static_cast<int>(m_multiIkResult->layers[point].candidates.size())) { return; }
+        stopJointPlayback();
+        m_multiIkSelections[point] = candidate;
+        m_widget.setMultiIkPointLabel(point, multiIkPointLabel(point));
+        if(continueFollowing) {
+            for(std::size_t i = point + 1; i < m_multiIkResult->layers.size(); ++i) {
+                const auto& previous = m_multiIkResult->layers[i - 1].candidates;
+                const auto& next = m_multiIkResult->layers[i].candidates;
+                if(previous.empty() || next.empty()) { break; }
+                const auto& q = previous[m_multiIkSelections[i - 1]].joints;
+                double best = std::numeric_limits<double>::infinity();
+                for(std::size_t c = 0; c < next.size(); ++c) {
+                    double cost = 0;
+                    for(std::size_t j = 0; j < q.size(); ++j) { cost += std::pow(next[c].joints[j] - q[j], 2); }
+                    if(cost < best) { best = cost; m_multiIkSelections[i] = c; }
+                }
+                m_widget.setMultiIkPointLabel(static_cast<int>(i), multiIkPointLabel(i));
+            }
+        }
+        showMultiIkPoint(point);
+    }
+
+    void MotionPlanningModuleController::applyMultiIk(int point, int candidate)
+    {
+        if(!m_multiIkResult || point < 0 || point >= static_cast<int>(m_multiIkResult->layers.size()) ||
+            candidate < 0 || candidate >= static_cast<int>(m_multiIkResult->layers[point].candidates.size())) { return; }
+        stopJointPlayback();
+        const auto names = m_multiIkResult->source.jointNames;
+        const auto q = m_multiIkResult->layers[point].candidates[candidate].joints;
+        applyJointValuesToRobot(names, q, QStringLiteral("motionPlanningMultiIkApply"));
+    }
+
+    void MotionPlanningModuleController::playMultiIk(double duration)
+    {
+        if(!m_multiIkResult) { return; }
+        stopJointPlayback();
+        auto plan = std::make_unique<motion_planning::StoredMotionPlan>();
+        std::string error;
+        if(!motion_planning::ProjectTrajectoryInverseKinematics::selectMultiIkTrajectory(
+            *m_multiIkResult, m_multiIkSelections, *plan, error)) {
+            m_widget.setResult(QString::fromStdString(error), false); return;
+        }
+        m_multiIkPlayback = std::move(plan);
+        startJointPlayback(duration);
+    }
+
 }

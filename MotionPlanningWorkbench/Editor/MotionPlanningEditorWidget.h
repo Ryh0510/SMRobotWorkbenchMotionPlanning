@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QString>
+#include <QStringList>
 #include <QVector>
 #include <QWidget>
 
@@ -69,6 +70,13 @@ public:
 
     explicit MotionPlanningEditorWidget(QWidget* parent = nullptr);
 
+    struct MultiIkPointRow { QString label; };
+    struct MultiIkCandidateRow { QStringList columns; };
+    void setMultiIkPoints(const QVector<MultiIkPointRow>& points, const QString& summary, bool complete);
+    void setMultiIkCandidates(const QVector<MultiIkCandidateRow>& rows, int selected);
+    void setMultiIkBusy(bool busy, const QString& message);
+    void setMultiIkPointLabel(int point, const QString& label);
+
     void setRobotId(const QString& robotId);
     void setJointDefaults(const QString& jointNames, const QString& startJoints);
     void setResult(const QString& summary, bool success);
@@ -102,6 +110,14 @@ signals:
         double duration,
         int sampleCount);
     void importTrajectoryRequested();
+    void multiIkRequested(bool useTool, const QVector<double>& lowerDegrees,
+        const QVector<double>& upperDegrees, int seeds);
+    void multiIkCancelRequested();
+    void multiIkPointChanged(int point);
+    void multiIkApplyRequested(int point, int candidate);
+    void multiIkSelectRequested(int point, int candidate, bool continueFollowing);
+    void multiIkPlaybackRequested(double duration);
+    void multiIkTargetChanged();
     void inverseKinematicsRequested(bool useToolTransform);
     void applySelectedJointPointRequested(int pointIndex);
     void importCdfJointAnglesRequested();
@@ -128,6 +144,17 @@ private:
     void updateCdfActions();
     void showControlPointContextMenu(const QPoint& pos);
 
+    QPushButton* m_allIkButton = nullptr;
+    QLabel* m_multiIkStatus = nullptr;
+    QComboBox* m_multiIkPoint = nullptr;
+    QTableWidget* m_multiIkTable = nullptr;
+    QPushButton* m_multiIkApply = nullptr;
+    QPushButton* m_multiIkSelect = nullptr;
+    QPushButton* m_multiIkContinue = nullptr;
+    QPushButton* m_multiIkPlay = nullptr;
+    QDoubleSpinBox* m_multiIkDuration = nullptr;
+    bool m_multiIkBusy = false;
+    bool m_multiIkComplete = false;
     QLabel* m_robotValue = nullptr;
     QLineEdit* m_startJoints = nullptr;
     QLineEdit* m_goalJoints = nullptr;

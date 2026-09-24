@@ -7,15 +7,18 @@
 #include <QString>
 
 #include <memory>
+#include <atomic>
 #include <string>
 #include <vector>
 
 class MotionPlanningEditorWidget;
 class QTimer;
+class QThread;
 
 namespace motion_planning
 {
     struct StoredMotionPlan;
+    struct CartesianMultiIkResult;
     class ProjectPlanningSceneSnapshot;
 }
 
@@ -49,6 +52,14 @@ namespace robot_qt_viewer
             int sampleCount);
         void importTrajectory();
         void importCdfJointAngles();
+        void solveMultiIk(bool useTool, const QVector<double>& lowerDegrees,
+            const QVector<double>& upperDegrees, int seeds);
+        void invalidateMultiIk();
+        void showMultiIkPoint(int point);
+        void selectMultiIk(int point, int candidate, bool continueFollowing);
+        void applyMultiIk(int point, int candidate);
+        void playMultiIk(double duration);
+        QString multiIkPointLabel(std::size_t point) const;
         void solveInverseKinematics(bool useToolTransform);
         void applySelectedJointPoint(int pointIndex);
         void applySelectedCdfJointAngles(int pointIndex);
@@ -100,6 +111,11 @@ namespace robot_qt_viewer
         QString m_cdfSourceName;
         std::vector<std::string> m_cdfJointNames;
         std::vector<ImportedCdfJointPoint> m_cdfJointPoints;
+        QThread* m_multiIkThread = nullptr;
+        std::shared_ptr<std::atomic_bool> m_multiIkCancel;
+        std::unique_ptr<motion_planning::CartesianMultiIkResult> m_multiIkResult;
+        std::vector<std::size_t> m_multiIkSelections;
+        std::unique_ptr<motion_planning::StoredMotionPlan> m_multiIkPlayback;
         QTimer* m_playbackTimer = nullptr;
         int m_playbackPointIndex = 0;
         int m_playbackCollisionSamples = 0;
