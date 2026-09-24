@@ -499,7 +499,7 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
     m_applyCdfJointButton = new QPushButton(QStringLiteral("Apply selected CDF joint angles"), cdfPage);
     cdfLayout->addWidget(m_applyCdfJointButton);
 
-    auto* cdfRepairTitle = new QLabel(QStringLiteral("CDF/QP Collision Repair"), cdfPage);
+    auto* cdfRepairTitle = new QLabel(QStringLiteral("APF + CDF/QP Collision Repair"), cdfPage);
     cdfRepairTitle->setProperty("panelTitle", true);
     cdfLayout->addWidget(cdfRepairTitle);
 
@@ -534,7 +534,7 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
 
     m_cdfMaxIterations = new QSpinBox(cdfPage);
     m_cdfMaxIterations->setRange(1, 1000);
-    m_cdfMaxIterations->setValue(5);
+    m_cdfMaxIterations->setValue(1);
     cdfRepairForm->addRow(QStringLiteral("Max iterations"), m_cdfMaxIterations);
 
     m_cdfKeepEndpoints = new QCheckBox(QStringLiteral("Lock endpoints"), cdfPage);
@@ -543,11 +543,11 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
 
     cdfLayout->addLayout(cdfRepairForm);
 
-    m_repairCdfTrajectoryButton = new QPushButton(QStringLiteral("Repair imported trajectory with CDF/QP"), cdfPage);
+    m_repairCdfTrajectoryButton = new QPushButton(QStringLiteral("Repair imported trajectory with APF + CDF/QP"), cdfPage);
     cdfLayout->addWidget(m_repairCdfTrajectoryButton);
 
     m_exportCdfTrajectoryButton = new QPushButton(
-        QStringLiteral("Export OMPL + CDF/QP trajectory..."),
+        QStringLiteral("Export APF + CDF/QP trajectory..."),
         cdfPage);
     cdfLayout->addWidget(m_exportCdfTrajectoryButton);
 

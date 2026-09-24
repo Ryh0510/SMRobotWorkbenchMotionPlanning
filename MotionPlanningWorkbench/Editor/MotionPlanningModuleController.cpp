@@ -427,8 +427,8 @@ namespace
     {
         return QStringLiteral("%1 %2 as %3. min phi: %4 -> %5, iterations=%6, qp_iters=%7, slack=%8, queries=%9")
             .arg(result.success
-                ? QStringLiteral("Stored repaired OMPL + CDF/QP trajectory")
-                : QStringLiteral("Stored partial OMPL + CDF/QP trajectory for inspection"))
+                ? QStringLiteral("Stored repaired APF + CDF/QP trajectory")
+                : QStringLiteral("Stored collision-free APF + CDF/QP trajectory below requested clearance"))
             .arg(static_cast<int>(result.plan.trajectory.points.size()))
             .arg(planId)
             .arg(formatDouble(result.statistics.initialMinimumPhi))
@@ -1067,9 +1067,9 @@ namespace robot_qt_viewer
                 options);
 
         if(repairResult.plan.trajectory.empty()) {
-            const QString message = firstDiagnosticMessage(
-                repairResult.diagnostics,
-                QStringLiteral("CDF/QP repair failed before producing a trajectory."));
+            const QString message = repairResult.diagnostics.empty()
+                ? QStringLiteral("APF + CDF/QP repair failed before producing a trajectory.")
+                : QString::fromStdString(repairResult.diagnostics.back().message);
             m_widget.setCdfResult(message, false);
             emit statusMessageRequested(message, 7000);
             return;
@@ -1078,7 +1078,7 @@ namespace robot_qt_viewer
         motion_planning::StoredMotionPlan storedPlan = repairResult.plan;
         if(!repairResult.success) {
             storedPlan.id = robotId + "_cdf_qp_partial";
-            storedPlan.name = "CDF/QP partial repaired trajectory";
+            storedPlan.name = "APF + CDF/QP trajectory (clearance not reached)";
             storedPlan.trajectory.name = storedPlan.id;
         }
         for(robottrajectory::TimedJointPoint& point : storedPlan.trajectory.points) {
@@ -1090,7 +1090,7 @@ namespace robot_qt_viewer
             return;
         }
 
-        m_cdfSourceName = QStringLiteral("%1 repaired by CDF/QP").arg(m_cdfSourceName.isEmpty()
+        m_cdfSourceName = QStringLiteral("%1 repaired by APF + CDF/QP").arg(m_cdfSourceName.isEmpty()
             ? QStringLiteral("Imported trajectory")
             : m_cdfSourceName);
         m_cdfJointNames = robotJointNames;
@@ -1108,9 +1108,9 @@ namespace robot_qt_viewer
         const QString planId = QString::fromStdString(storedPlan.id);
         const QString diagnosticText = repairResult.success
             ? QString()
-            : QStringLiteral(" %1").arg(firstDiagnosticMessage(
-                repairResult.diagnostics,
-                QStringLiteral("The repaired path still violates the requested clearance.")));
+            : QStringLiteral(" %1").arg(repairResult.diagnostics.empty()
+                ? QStringLiteral("The repaired path still violates the requested clearance.")
+                : QString::fromStdString(repairResult.diagnostics.back().message));
         const QString summary = cdfRepairSummary(repairResult, planId) + diagnosticText;
         m_widget.setCdfResult(summary, repairResult.success);
         emit trajectoryPlanned(planId);
@@ -1136,7 +1136,7 @@ namespace robot_qt_viewer
             return;
         }
         if(cdfOnly && !isCdfQpTrajectory(*selectedPlan)) {
-            showResult(QStringLiteral("Select a trajectory produced by OMPL + CDF/QP repair before exporting."), false);
+            showResult(QStringLiteral("Select a trajectory produced by APF + CDF/QP repair before exporting."), false);
             return;
         }
         // Validate every source row, including rows omitted from the sampled UI table.
@@ -1153,9 +1153,9 @@ namespace robot_qt_viewer
             cdfOnly ? QStringLiteral("motionPlanning.cdfTrajectory.save")
                     : QStringLiteral("motionPlanning.jointTrajectory.save"),
             &m_widget,
-            cdfOnly ? QStringLiteral("Export OMPL + CDF/QP trajectory")
+            cdfOnly ? QStringLiteral("Export APF + CDF/QP trajectory")
                     : QStringLiteral("\u5bfc\u51fa\u5173\u8282\u8f68\u8ff9"),
-            cdfOnly ? QStringLiteral("%1_ompl_cdf_qp_trajectory.txt").arg(m_selectedRobotId)
+            cdfOnly ? QStringLiteral("%1_apf_cdf_qp_trajectory.txt").arg(m_selectedRobotId)
                     : QStringLiteral("ik_joint_angles.txt"),
             QStringLiteral("Text Files (*.txt);;All Files (*)"));
         if(outputPath.isEmpty()) { return; }

@@ -63,7 +63,7 @@ public:
         double seedCorridor = 0.06;
         double seedTrackingWeight = 0.55;
         int segmentIntermediateSamples = 2;
-        int maxIterations = 8;
+        int maxIterations = 1;
         bool keepEndpoints = true;
     };
 
