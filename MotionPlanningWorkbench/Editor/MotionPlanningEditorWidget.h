@@ -1,10 +1,12 @@
 #pragma once
 
+#include <QPointer>
 #include <QString>
 #include <QStringList>
 #include <QVector>
 #include <QWidget>
 
+class QDialog;
 class QDoubleSpinBox;
 class QCheckBox;
 class QComboBox;
@@ -13,6 +15,7 @@ class QLineEdit;
 class QPushButton;
 class QSpinBox;
 class QTableWidget;
+class QTabWidget;
 class QPoint;
 
 class MotionPlanningEditorWidget : public QWidget
@@ -76,6 +79,11 @@ public:
     void setMultiIkCandidates(const QVector<MultiIkCandidateRow>& rows, int selected);
     void setMultiIkBusy(bool busy, const QString& message);
     void setMultiIkPointLabel(int point, const QString& label);
+    void setLayeredGraphResults(const QVector<QStringList>& rows, const QString& summary);
+    void setLayeredGraphPath(const QVector<QStringList>& rows);
+    void setLayeredGraphBusy(bool busy, const QString& message);
+    void showConfigurationSelection(const QVector<QVector<int>>& sequences, int initialRank);
+    void showCdfPage();
 
     void setRobotId(const QString& robotId);
     void setJointDefaults(const QString& jointNames, const QString& startJoints);
@@ -118,6 +126,12 @@ signals:
     void multiIkSelectRequested(int point, int candidate, bool continueFollowing);
     void multiIkPlaybackRequested(double duration);
     void multiIkTargetChanged();
+    void layeredGraphRequested(int maxPaths, const QVector<double>& weights);
+    void layeredGraphCancelRequested();
+    void layeredGraphSettingsChanged();
+    void layeredGraphSelectionChanged(int row);
+    void configurationSelectionRequested(int row);
+    void useLayeredGraphResultRequested(int row);
     void inverseKinematicsRequested(bool useToolTransform);
     void applySelectedJointPointRequested(int pointIndex);
     void importCdfJointAnglesRequested();
@@ -144,6 +158,17 @@ private:
     void updateCdfActions();
     void showControlPointContextMenu(const QPoint& pos);
 
+    QTabWidget* m_tabs = nullptr;
+    QSpinBox* m_graphMaxPaths = nullptr;
+    QLineEdit* m_graphWeights = nullptr;
+    QPushButton* m_graphFilter = nullptr;
+    QPushButton* m_graphUse = nullptr;
+    QPushButton* m_graphView = nullptr;
+    QPointer<QDialog> m_configurationDialog;
+    QLabel* m_graphStatus = nullptr;
+    QTableWidget* m_graphResults = nullptr;
+    QTableWidget* m_graphPath = nullptr;
+    bool m_graphBusy = false;
     QPushButton* m_allIkButton = nullptr;
     QLabel* m_multiIkStatus = nullptr;
     QComboBox* m_multiIkPoint = nullptr;

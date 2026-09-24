@@ -19,6 +19,7 @@ namespace motion_planning
 {
     struct StoredMotionPlan;
     struct CartesianMultiIkResult;
+    struct LayeredIkGraphResult;
     class ProjectPlanningSceneSnapshot;
 }
 
@@ -55,6 +56,11 @@ namespace robot_qt_viewer
         void solveMultiIk(bool useTool, const QVector<double>& lowerDegrees,
             const QVector<double>& upperDegrees, int seeds);
         void invalidateMultiIk();
+        void filterLayeredGraph(int maxPaths, const QVector<double>& weights);
+        void invalidateLayeredGraph();
+        void showLayeredGraphPath(int row);
+        void useLayeredGraphResult(int row);
+        void clearGraphCdfSeed();
         void showMultiIkPoint(int point);
         void selectMultiIk(int point, int candidate, bool continueFollowing);
         void applyMultiIk(int point, int candidate);
@@ -111,6 +117,10 @@ namespace robot_qt_viewer
         QString m_cdfSourceName;
         std::vector<std::string> m_cdfJointNames;
         std::vector<ImportedCdfJointPoint> m_cdfJointPoints;
+        QThread* m_graphThread = nullptr;
+        std::shared_ptr<std::atomic_bool> m_graphCancel;
+        std::unique_ptr<motion_planning::LayeredIkGraphResult> m_graphResult;
+        QString m_graphCdfRobotId;
         QThread* m_multiIkThread = nullptr;
         std::shared_ptr<std::atomic_bool> m_multiIkCancel;
         std::unique_ptr<motion_planning::CartesianMultiIkResult> m_multiIkResult;

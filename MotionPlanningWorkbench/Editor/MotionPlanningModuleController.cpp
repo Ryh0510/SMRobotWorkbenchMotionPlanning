@@ -15,6 +15,7 @@
 #include <ProjectMotionPlanning/TrajectoryControlPointEditing.h>
 #include <ProjectMotionPlanning/TrajectoryImport.h>
 #include <ProjectMotionPlanning/TrajectoryInverseKinematics.h>
+#include <ProjectMotionPlanning/LayeredIkGraph.h>
 #include <SimulationProject/ProjectDocumentService.h>
 #include <SimulationProject/RuntimePaths.h>
 
@@ -466,6 +467,29 @@ namespace robot_qt_viewer
             this, &MotionPlanningModuleController::importTrajectory);
         connect(&m_widget, &MotionPlanningEditorWidget::importCdfJointAnglesRequested,
             this, &MotionPlanningModuleController::importCdfJointAngles);
+        connect(&m_widget, &MotionPlanningEditorWidget::layeredGraphRequested,
+            this, &MotionPlanningModuleController::filterLayeredGraph);
+        connect(&m_widget, &MotionPlanningEditorWidget::layeredGraphCancelRequested, this, [this]() {
+            if(m_graphCancel) { m_graphCancel->store(true); }
+        });
+        connect(&m_widget, &MotionPlanningEditorWidget::layeredGraphSettingsChanged,
+            this, &MotionPlanningModuleController::invalidateLayeredGraph);
+        connect(&m_widget, &MotionPlanningEditorWidget::layeredGraphSelectionChanged,
+            this, &MotionPlanningModuleController::showLayeredGraphPath);
+        connect(&m_widget, &MotionPlanningEditorWidget::configurationSelectionRequested, this, [this](int row) {
+            if(m_graphThread || !m_graphResult || !m_graphResult->success) { return; }
+            QVector<QVector<int>> sequences;
+            sequences.reserve(static_cast<int>(m_graphResult->paths.size()));
+            for(const auto& path : m_graphResult->paths) {
+                QVector<int> sequence;
+                sequence.reserve(static_cast<int>(path.selections.size()));
+                for(std::size_t index : path.selections) { sequence.push_back(static_cast<int>(index + 1)); }
+                sequences.push_back(std::move(sequence));
+            }
+            m_widget.showConfigurationSelection(sequences, row);
+        });
+        connect(&m_widget, &MotionPlanningEditorWidget::useLayeredGraphResultRequested,
+            this, &MotionPlanningModuleController::useLayeredGraphResult);
         connect(&m_widget, &MotionPlanningEditorWidget::multiIkRequested,
             this, &MotionPlanningModuleController::solveMultiIk);
         connect(&m_widget, &MotionPlanningEditorWidget::multiIkCancelRequested, this, [this]() {
@@ -532,7 +556,9 @@ namespace robot_qt_viewer
     MotionPlanningModuleController::~MotionPlanningModuleController()
     {
         if(m_multiIkCancel) { m_multiIkCancel->store(true); }
+        if(m_graphCancel) { m_graphCancel->store(true); }
         if(m_multiIkThread) { m_multiIkThread->wait(); }
+        if(m_graphThread) { m_graphThread->wait(); }
     }
 
     void MotionPlanningModuleController::ensurePersistentCdfCollisionSetup()
@@ -598,12 +624,15 @@ namespace robot_qt_viewer
             kinematicPreviewChanged ||
             (event.kind == RobotQtViewerEventKind::ProjectDocumentChanged &&
              event.sourceId != QStringLiteral("motionPlanningMultiIkApply") &&
+             event.sourceId != QStringLiteral("motionPlanningApplyJointPoint") &&
+             event.sourceId != QStringLiteral("motionPlanningApplyCdfJointAngles") &&
              event.sourceId != QStringLiteral("motionPlanningPersistentCdfCollisionSetup"))) {
             invalidateMultiIk();
         }
         if(event.kind == RobotQtViewerEventKind::SelectionChanged) {
             setSelectedRobot(event.selection.robotId);
         } else if(event.kind == RobotQtViewerEventKind::ProjectOpened) {
+            clearGraphCdfSeed();
             stopJointPlayback();
             clearSprayMeasurements();
             clearEndEffectorTrace();
@@ -794,6 +823,7 @@ namespace robot_qt_viewer
             return;
         }
 
+        m_graphCdfRobotId.clear();
         m_cdfSourceName = QString::fromStdString(importResult.sourceName);
         m_cdfJointNames = importResult.jointNames;
         m_cdfJointPoints.clear();
@@ -1071,7 +1101,8 @@ namespace robot_qt_viewer
                 degreesToRadians(importedPoint.jointAnglesDegrees));
             seedTrajectory.points.push_back(std::move(point));
         }
-        seedTrajectory.sortByTime();
+        std::stable_sort(seedTrajectory.points.begin(), seedTrajectory.points.end(),
+            [](const auto& a, const auto& b) { return a.time < b.time; });
 
         const MotionPlanningEditorWidget::CdfQpRepairSettings settings =
             m_widget.cdfQpRepairSettings();
@@ -1667,6 +1698,7 @@ namespace robot_qt_viewer
     void MotionPlanningModuleController::setSelectedRobot(const QString& robotId)
     {
         if(m_selectedRobotId != robotId) {
+            clearGraphCdfSeed();
             invalidateMultiIk();
             stopJointPlayback();
             clearSprayMeasurements();
@@ -2120,6 +2152,7 @@ namespace robot_qt_viewer
 
     void MotionPlanningModuleController::invalidateMultiIk()
     {
+        invalidateLayeredGraph();
         if(m_multiIkCancel) { m_multiIkCancel->store(true); }
         if(m_multiIkPlayback) { stopJointPlayback(); }
         m_multiIkResult.reset();
@@ -2313,4 +2346,129 @@ namespace robot_qt_viewer
         startJointPlayback(duration);
     }
 
+}
+
+namespace robot_qt_viewer
+{
+    void MotionPlanningModuleController::invalidateLayeredGraph()
+    {
+        if(m_graphCancel) { m_graphCancel->store(true); }
+        m_graphResult.reset();
+        m_widget.setLayeredGraphResults({}, QStringLiteral("\u8bf7\u4f7f\u7528\u5f53\u524d\u591a\u9006\u89e3\u7ed3\u679c\u8fdb\u884c\u5206\u5c42\u56fe\u7b5b\u9009\u3002"));
+    }
+
+    void MotionPlanningModuleController::filterLayeredGraph(int maxPaths, const QVector<double>& weights)
+    {
+        if(m_graphThread || m_multiIkThread || !m_multiIkResult || !m_multiIkResult->success) { return; }
+        stopJointPlayback();
+        invalidateLayeredGraph();
+        auto cancel = std::make_shared<std::atomic_bool>(false);
+        m_graphCancel = cancel;
+        motion_planning::LayeredIkGraphOptions options;
+        options.maxPaths = maxPaths > 0 ? static_cast<std::size_t>(maxPaths) : 0;
+        options.jointWeights.assign(weights.begin(), weights.end());
+        options.cancelled = [cancel]() { return cancel->load(); };
+        options.progress = [this, cancel](std::size_t done, std::size_t count) {
+            if(done != count && done % 10 != 0) { return; }
+            QMetaObject::invokeMethod(this, [this, cancel, done, count]() {
+                if(!cancel->load()) { m_widget.setLayeredGraphBusy(true,
+                    QStringLiteral("\u5206\u5c42\u56fe %1 / %2").arg(static_cast<qulonglong>(done)).arg(static_cast<qulonglong>(count))); }
+            }, Qt::QueuedConnection);
+        };
+        auto input = std::make_shared<motion_planning::CartesianMultiIkResult>(*m_multiIkResult);
+        auto output = std::make_shared<motion_planning::LayeredIkGraphResult>();
+        m_widget.setLayeredGraphBusy(true, QStringLiteral("\u6b63\u5728\u8ba1\u7b97 Top-M \u5b8c\u6574\u6784\u578b\u5e8f\u5217..."));
+        m_graphThread = QThread::create([input, output, options]() {
+            try { *output = motion_planning::ProjectLayeredIkGraph::filter(*input, options); }
+            catch(const std::exception& error) { output->message = error.what(); }
+            catch(...) { output->message = "Layered graph search failed unexpectedly."; }
+        });
+        m_graphThread->setParent(this);
+        connect(m_graphThread, &QThread::finished, this, [this, cancel, output]() {
+            m_graphThread->deleteLater(); m_graphThread = nullptr; m_graphCancel.reset();
+            if(cancel->load()) {
+                m_widget.setLayeredGraphBusy(false, QStringLiteral("\u5206\u5c42\u56fe\u7b5b\u9009\u5df2\u53d6\u6d88\u3002")); return;
+            }
+            m_graphResult = std::make_unique<motion_planning::LayeredIkGraphResult>(std::move(*output));
+            QVector<QStringList> rows;
+            for(std::size_t i = 0; i < m_graphResult->paths.size(); ++i) {
+                const auto& path = m_graphResult->paths[i];
+                rows.push_back({QString::number(i + 1), QString::number(path.cost, 'g', 15),
+                    QString::number(path.selections.size()), QString::number(path.selections.front() + 1),
+                    QString::number(path.selections.back() + 1)});
+            }
+            QString summary = QString::fromStdString(m_graphResult->message);
+            if(m_graphResult->success) {
+                summary = QStringLiteral("\u5df2\u7b5b\u9009 %1 \u6761\u5b8c\u6574\u5e8f\u5217\uff0c\u6309\u5173\u8282\u4f4d\u79fb\u4ee3\u4ef7\u5347\u5e8f\u3002\n\u672a\u505a\u78b0\u649e\u68c0\u6d4b\u53ca\u901f\u5ea6/\u52a0\u901f\u5ea6\u7ea6\u675f\uff0c\u4ec5\u5728\u5df2\u627e\u5230\u7684 IK \u5019\u9009\u5185\u6392\u540d\u3002")
+                    .arg(rows.size());
+                if(m_multiIkResult && std::any_of(m_multiIkResult->layers.begin(), m_multiIkResult->layers.end(),
+                    [](const auto& layer) { return layer.truncated; })) {
+                    summary += QStringLiteral("\n\u6ce8\u610f\uff1a\u8f93\u5165\u591a\u9006\u89e3\u5b58\u5728\u622a\u65ad\u3002");
+                }
+            }
+            m_widget.setLayeredGraphResults(rows, summary);
+            m_widget.setLayeredGraphBusy(false, summary);
+        });
+        m_graphThread->start();
+    }
+
+    void MotionPlanningModuleController::showLayeredGraphPath(int row)
+    {
+        QVector<QStringList> rows;
+        if(m_graphResult && m_multiIkResult && row >= 0 && row < static_cast<int>(m_graphResult->paths.size())) {
+            const auto& path = m_graphResult->paths[row];
+            for(std::size_t i = 0; i < path.selections.size(); ++i) {
+                const auto& layer = m_multiIkResult->layers[i];
+                const auto& candidate = layer.candidates[path.selections[i]];
+                QStringList joints, turns;
+                for(double q : candidate.joints) { joints << QString::number(q * 180.0 / kPi, 'f', 6); }
+                for(int turn : candidate.turns) { turns << QString::number(turn); }
+                rows.push_back({QString::number(i + 1), QString::number(layer.time, 'g', 12),
+                    QString::number(path.selections[i] + 1), joints.join(QStringLiteral(", ")), turns.join(QStringLiteral(", "))});
+            }
+        }
+        m_widget.setLayeredGraphPath(rows);
+    }
+
+    void MotionPlanningModuleController::useLayeredGraphResult(int row)
+    {
+        if(m_graphThread || m_multiIkThread || !m_multiIkResult || !m_graphResult || !m_graphResult->success ||
+            row < 0 || row >= static_cast<int>(m_graphResult->paths.size())) { return; }
+        motion_planning::StoredMotionPlan selected;
+        std::string error;
+        if(!motion_planning::ProjectTrajectoryInverseKinematics::selectMultiIkTrajectory(
+            *m_multiIkResult, m_graphResult->paths[row].selections, selected, error)) {
+            m_widget.setCdfResult(QString::fromStdString(error), false); return;
+        }
+        if(selected.robotId != m_selectedRobotId.toStdString() ||
+            selected.jointNames != selectedRobotJointNames(m_context.document(), m_selectedRobotId)) {
+            m_widget.setCdfResult(QStringLiteral("Robot/joint order changed; regenerate IK before using this seed."), false); return;
+        }
+        stopJointPlayback();
+        m_graphCdfRobotId = m_selectedRobotId;
+        m_cdfSourceName = QStringLiteral("%1 | Top-M #%2 | cost=%3")
+            .arg(QString::fromStdString(selected.name.empty() ? selected.id : selected.name)).arg(row + 1)
+            .arg(m_graphResult->paths[row].cost, 0, 'g', 12);
+        m_cdfJointNames = selected.jointNames;
+        m_cdfJointPoints.clear();
+        m_cdfJointPoints.reserve(selected.trajectory.points.size());
+        for(const auto& point : selected.trajectory.points) {
+            m_cdfJointPoints.push_back({point.time, radiansToDegrees(point.q)});
+        }
+        refreshCdfJointAngleView();
+        m_widget.setCdfExportAvailable(false);
+        m_widget.setCdfResult(QStringLiteral("\u5df2\u5c06\u7b2c %1 \u7ec4\u7684 %2 \u4e2a\u70b9\u8bbe\u4e3a\u521d\u59cb\u89e3\uff0c\u53ef\u6267\u884c APF + CDF/QP\u3002")
+            .arg(row + 1).arg(static_cast<qulonglong>(m_cdfJointPoints.size())), true);
+        m_widget.showCdfPage();
+    }
+
+    void MotionPlanningModuleController::clearGraphCdfSeed()
+    {
+        if(m_graphCdfRobotId.isEmpty()) { return; }
+        m_graphCdfRobotId.clear();
+        m_cdfSourceName.clear(); m_cdfJointNames.clear(); m_cdfJointPoints.clear();
+        refreshCdfJointAngleView();
+        m_widget.setCdfExportAvailable(false);
+        m_widget.setCdfResult(QStringLiteral("Robot/project changed. Select a new initial trajectory."), false);
+    }
 }
