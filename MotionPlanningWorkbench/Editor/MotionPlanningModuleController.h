@@ -5,6 +5,7 @@
 
 #include <QObject>
 #include <QString>
+#include <QStringList>
 
 #include <memory>
 #include <atomic>
@@ -56,10 +57,10 @@ namespace robot_qt_viewer
         void solveMultiIk(bool useTool, const QVector<double>& lowerDegrees,
             const QVector<double>& upperDegrees, int seeds);
         void invalidateMultiIk();
-        void filterLayeredGraph(int maxPaths, const QVector<double>& weights);
+        void filterLayeredGraph(int maxPaths, const QVector<double>& weights, int perStartPaths);
         void invalidateLayeredGraph();
-        void showLayeredGraphPath(int row);
-        void useLayeredGraphResult(int row);
+        void showLayeredGraphPath(int row, bool byStart);
+        void useLayeredGraphResult(int row, bool byStart);
         void clearGraphCdfSeed();
         void showMultiIkPoint(int point);
         void selectMultiIk(int point, int candidate, bool continueFollowing);
@@ -120,6 +121,8 @@ namespace robot_qt_viewer
         QThread* m_graphThread = nullptr;
         std::shared_ptr<std::atomic_bool> m_graphCancel;
         std::unique_ptr<motion_planning::LayeredIkGraphResult> m_graphResult;
+        std::unique_ptr<motion_planning::LayeredIkGraphResult> m_graphStartResult;
+        QStringList m_graphStartLabels;
         QString m_graphCdfRobotId;
         QThread* m_multiIkThread = nullptr;
         std::shared_ptr<std::atomic_bool> m_multiIkCancel;

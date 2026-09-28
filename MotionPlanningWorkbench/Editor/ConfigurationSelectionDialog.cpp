@@ -13,6 +13,8 @@
 #include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSpinBox>
+#include <QTabWidget>
+#include <QSet>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -35,8 +37,8 @@ namespace
 class ConfigurationSelectionPlot : public QWidget
 {
 public:
-    ConfigurationSelectionPlot(const QVector<QVector<int>>& sequences, QWidget* parent)
-        : QWidget(parent), m_sequences(sequences)
+    ConfigurationSelectionPlot(const QVector<QVector<int>>& sequences, const QStringList& labels, QWidget* parent)
+        : QWidget(parent), m_sequences(sequences), m_labels(labels)
     {
         setObjectName(QStringLiteral("configurationSelectionPlot"));
         setMinimumWidth(460);
@@ -101,7 +103,7 @@ protected:
                 QStringLiteral("\u672c\u70b9\u9006\u89e3\u7f16\u53f7"));
             painter.restore();
             const QVector<int> ranks = m_separate ? QVector<int>{m_ranks[panel]} : m_ranks;
-            const QString title = m_separate ? QStringLiteral("\u7ed3\u679c #%1").arg(ranks.front() + 1) :
+            const QString title = m_separate ? m_labels.value(ranks.front(), QStringLiteral("#%1").arg(ranks.front() + 1)) :
                 QStringLiteral("\u6784\u578b\u9009\u62e9\u5bf9\u6bd4\uff08%1 \u6761\uff09").arg(ranks.size());
             painter.drawText(QRectF(plot.left(), plot.top() - 25, plot.width(), 20), Qt::AlignLeft, title);
             painter.save();
@@ -131,6 +133,7 @@ protected:
 
 private:
     QVector<QVector<int>> m_sequences;
+    QStringList m_labels;
     QVector<int> m_ranks;
     int m_first = 0;
     int m_last = 0;
@@ -138,16 +141,12 @@ private:
     bool m_separate = false;
 };
 
-ConfigurationSelectionDialog::ConfigurationSelectionDialog(const QVector<QVector<int>>& sequences,
-    int initialRank, QWidget* parent)
-    : QDialog(parent, Qt::Window), m_sequences(sequences)
+ConfigurationSelectionPage::ConfigurationSelectionPage(const QVector<QVector<int>>& sequences,
+    const QStringList& labels, const QString& explanation, int initialRank, bool selectStartBest, QWidget* parent)
+    : QWidget(parent), m_sequences(sequences)
 {
-    setObjectName(QStringLiteral("configurationSelectionDialog"));
-    setWindowTitle(QStringLiteral("\u67e5\u770b\u6784\u578b\u9009\u62e9"));
-    setAttribute(Qt::WA_DeleteOnClose);
-    resize(980, 590);
     auto* layout = new QVBoxLayout(this);
-    auto* note = new QLabel(QStringLiteral("\u663e\u793a\u5f53\u524d\u5206\u5c42\u56fe Top-M \u5019\u9009\u3002\u9006\u89e3\u7f16\u53f7\u4ec5\u5728\u5f53\u524d\u63a7\u5236\u70b9\u5185\u6709\u6548\uff0c\u4e0d\u662f\u56fa\u5b9a\u7684\u80a9/\u8098/\u8155\u5206\u652f\u6807\u7b7e\uff1b\u76f8\u540c\u9009\u62e9\u5904\u66f2\u7ebf\u91cd\u5408\uff0c\u53ef\u5207\u6362\u5206\u884c\u5bf9\u6bd4\u3002"), this);
+    auto* note = new QLabel(explanation, this);
     note->setWordWrap(true); layout->addWidget(note);
     auto* controls = new QHBoxLayout;
     int count = 1;
@@ -166,14 +165,26 @@ ConfigurationSelectionDialog::ConfigurationSelectionDialog(const QVector<QVector
     auto* sidebar = new QVBoxLayout;
     sidebar->addWidget(new QLabel(QStringLiteral("\u52fe\u9009\u7ed3\u679c\u5e8f\u5217\u53f7\uff08\u6392\u540d\uff09"), this));
     m_ranks = new QListWidget(this); m_ranks->setObjectName(QStringLiteral("configurationRanks"));
-    m_ranks->setMaximumWidth(230); m_ranks->setMinimumWidth(160);
+    m_ranks->setMaximumWidth(380); m_ranks->setMinimumWidth(selectStartBest ? 280 : 160);
+    m_ranks->setWordWrap(true);
+    m_ranks->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    QSet<int> checkedStarts;
     for(int rank = 0; rank < sequences.size(); ++rank) {
         QPixmap swatch(30, 14); swatch.fill(Qt::transparent);
         QPainter painter(&swatch); painter.setPen(QPen(rankColor(rank), 2, rankStyle(rank)));
         painter.drawLine(0, 7, 30, 7);
-        auto* item = new QListWidgetItem(QIcon(swatch), QStringLiteral("\u7ed3\u679c #%1").arg(rank + 1), m_ranks);
+        painter.end();
+        const auto label = labels.value(rank, QStringLiteral("#%1").arg(rank + 1));
+        auto displayLabel = label;
+        const int separator = displayLabel.lastIndexOf(QStringLiteral(" / "));
+        if(selectStartBest && separator >= 0) { displayLabel.replace(separator, 3, QStringLiteral("\n")); }
+        auto* item = new QListWidgetItem(QIcon(swatch), displayLabel, m_ranks);
+        item->setToolTip(label);
         item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
-        item->setCheckState(rank == 0 || rank == initialRank ? Qt::Checked : Qt::Unchecked);
+        const int start = sequences[rank].isEmpty() ? -1 : sequences[rank].front();
+        const bool checked = selectStartBest ? !checkedStarts.contains(start) || rank == initialRank : rank == 0 || rank == initialRank;
+        item->setCheckState(checked ? Qt::Checked : Qt::Unchecked);
+        checkedStarts.insert(start);
     }
     sidebar->addWidget(m_ranks);
     auto* selectionButtons = new QHBoxLayout;
@@ -182,12 +193,10 @@ ConfigurationSelectionDialog::ConfigurationSelectionDialog(const QVector<QVector
     selectionButtons->addWidget(all); selectionButtons->addWidget(none); sidebar->addLayout(selectionButtons);
     body->addLayout(sidebar);
     auto* scroll = new QScrollArea(this); scroll->setWidgetResizable(true);
-    m_plot = new ConfigurationSelectionPlot(m_sequences, scroll); scroll->setWidget(m_plot);
+    m_plot = new ConfigurationSelectionPlot(m_sequences, labels, scroll); scroll->setWidget(m_plot);
     body->addWidget(scroll, 1); layout->addLayout(body, 1);
     m_summary = new QLabel(this); m_summary->setObjectName(QStringLiteral("configurationSummary"));
     m_summary->setWordWrap(true); layout->addWidget(m_summary);
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, this);
-    connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::close); layout->addWidget(buttons);
     connect(m_ranks, &QListWidget::itemChanged, this, [this]() { refreshPlot(); });
     const auto selectAll = [this](Qt::CheckState state) {
         const QSignalBlocker blocker(m_ranks);
@@ -212,7 +221,7 @@ ConfigurationSelectionDialog::ConfigurationSelectionDialog(const QVector<QVector
     refreshPlot();
 }
 
-QVector<int> ConfigurationSelectionDialog::selectedRanks() const
+QVector<int> ConfigurationSelectionPage::selectedRanks() const
 {
     QVector<int> ranks;
     for(int i = 0; i < m_ranks->count(); ++i) {
@@ -221,7 +230,7 @@ QVector<int> ConfigurationSelectionDialog::selectedRanks() const
     return ranks;
 }
 
-void ConfigurationSelectionDialog::refreshPlot()
+void ConfigurationSelectionPage::refreshPlot()
 {
     const auto ranks = selectedRanks();
     const int first = m_first->value() - 1, last = m_last->value() - 1;
@@ -238,4 +247,55 @@ void ConfigurationSelectionDialog::refreshPlot()
     m_summary->setText(QStringLiteral("\u5df2\u9009 %1 / %2 \u6761\uff1b\u63a7\u5236\u70b9 %3\u2013%4\uff1b\u5176\u4e2d %5 \u4e2a\u70b9\u7684\u9006\u89e3\u9009\u62e9\u5b58\u5728\u5dee\u5f02\u3002")
         .arg(ranks.size()).arg(m_sequences.size()).arg(first + 1).arg(last + 1).arg(different));
     m_plot->setView(ranks, first, last, m_separate->isChecked());
+}
+
+ConfigurationSelectionDialog::ConfigurationSelectionDialog(const QVector<QVector<int>>& sequences,
+    int initialRank, QWidget* parent)
+    : ConfigurationSelectionDialog(sequences, {}, {}, initialRank, false, parent)
+{
+}
+
+ConfigurationSelectionDialog::ConfigurationSelectionDialog(const QVector<QVector<int>>& globalSequences,
+    const QVector<QVector<int>>& startSequences, const QStringList& startLabels,
+    int initialRank, bool byStart, QWidget* parent)
+    : QDialog(parent, Qt::Window)
+{
+    setObjectName(QStringLiteral("configurationSelectionDialog"));
+    setWindowTitle(QStringLiteral("\u67e5\u770b\u6784\u578b\u9009\u62e9"));
+    setAttribute(Qt::WA_DeleteOnClose);
+    resize(1100, 650);
+    auto* layout = new QVBoxLayout(this);
+    m_tabs = new QTabWidget(this); m_tabs->setObjectName(QStringLiteral("configurationSelectionTabs"));
+    QStringList globalLabels;
+    for(int i = 0; i < globalSequences.size(); ++i) { globalLabels << QStringLiteral("\u5168\u5c40 #%1").arg(i + 1); }
+    const auto note = QStringLiteral("\u9006\u89e3\u7f16\u53f7\u4ec5\u5728\u5f53\u524d\u63a7\u5236\u70b9\u5185\u6709\u6548\uff0c\u4e0d\u662f\u56fa\u5b9a\u80a9/\u8098/\u8155\u6807\u7b7e\uff1b\u91cd\u5408\u65f6\u53ef\u5206\u884c\u5bf9\u6bd4\u3002");
+    m_pages[0] = new ConfigurationSelectionPage(globalSequences, globalLabels,
+        QStringLiteral("\u5168\u5c40 Top-M\uff1a\u4e0d\u9650\u5236\u8d77\u70b9\uff0c\u5728\u6240\u6709\u5b8c\u6574\u5e8f\u5217\u4e2d\u6309\u603b\u4ee3\u4ef7\u6392\u540d\uff0c\u53ef\u80fd\u6765\u81ea\u540c\u4e00\u8d77\u70b9\u3002") + note,
+        byStart ? 0 : initialRank, false, m_tabs);
+    m_pages[1] = new ConfigurationSelectionPage(startSequences, startLabels,
+        QStringLiteral("\u6309\u8d77\u70b9 Top-K\uff1a\u56fa\u5b9a\u6bcf\u4e00\u4e2a\u8d77\u70b9\u9006\u89e3\uff0c\u72ec\u7acb\u6c42\u8be5\u8d77\u70b9\u7684\u524d K \u6761\u5b8c\u6574\u8f68\u8ff9\uff1b\u9ed8\u8ba4\u52fe\u9009\u5404\u7ec4\u6700\u4f18\u3002\u5168\u5c40 >M \u8868\u793a\u672a\u8fdb\u5165\u7b2c\u4e00\u9875\u524d M \u6761\uff0c\u5177\u4f53\u540d\u6b21\u672a\u8ba1\u7b97\u3002") + note,
+        byStart ? initialRank : -1, true, m_tabs);
+    m_pages[0]->setObjectName(QStringLiteral("configurationGlobalPage"));
+    m_pages[1]->setObjectName(QStringLiteral("configurationStartPage"));
+    m_tabs->addTab(m_pages[0], QStringLiteral("\u5168\u5c40 Top-M"));
+    m_tabs->addTab(m_pages[1], QStringLiteral("\u6309\u8d77\u70b9 Top-K"));
+    selectPage(byStart);
+    layout->addWidget(m_tabs);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, this);
+    connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::close); layout->addWidget(buttons);
+}
+
+const QVector<QVector<int>>& ConfigurationSelectionDialog::sequences(int page) const
+{
+    return m_pages[page == 1 ? 1 : 0]->sequences();
+}
+
+QVector<int> ConfigurationSelectionDialog::selectedRanks(int page) const
+{
+    return m_pages[page == 1 ? 1 : 0]->selectedRanks();
+}
+
+void ConfigurationSelectionDialog::selectPage(bool byStart)
+{
+    m_tabs->setCurrentIndex(byStart ? 1 : 0);
 }

@@ -79,10 +79,12 @@ public:
     void setMultiIkCandidates(const QVector<MultiIkCandidateRow>& rows, int selected);
     void setMultiIkBusy(bool busy, const QString& message);
     void setMultiIkPointLabel(int point, const QString& label);
-    void setLayeredGraphResults(const QVector<QStringList>& rows, const QString& summary);
+    void setLayeredGraphResults(const QVector<QStringList>& rows, const QString& summary,
+        const QVector<QStringList>& startRows = {});
     void setLayeredGraphPath(const QVector<QStringList>& rows);
     void setLayeredGraphBusy(bool busy, const QString& message);
-    void showConfigurationSelection(const QVector<QVector<int>>& sequences, int initialRank);
+    void showConfigurationSelection(const QVector<QVector<int>>& sequences,
+        const QVector<QVector<int>>& startSequences, const QStringList& startLabels, int initialRank, bool byStart);
     void showCdfPage();
 
     void setRobotId(const QString& robotId);
@@ -126,12 +128,12 @@ signals:
     void multiIkSelectRequested(int point, int candidate, bool continueFollowing);
     void multiIkPlaybackRequested(double duration);
     void multiIkTargetChanged();
-    void layeredGraphRequested(int maxPaths, const QVector<double>& weights);
+    void layeredGraphRequested(int maxPaths, const QVector<double>& weights, int perStartPaths);
     void layeredGraphCancelRequested();
     void layeredGraphSettingsChanged();
-    void layeredGraphSelectionChanged(int row);
-    void configurationSelectionRequested(int row);
-    void useLayeredGraphResultRequested(int row);
+    void layeredGraphSelectionChanged(int row, bool byStart);
+    void configurationSelectionRequested(int row, bool byStart);
+    void useLayeredGraphResultRequested(int row, bool byStart);
     void inverseKinematicsRequested(bool useToolTransform);
     void applySelectedJointPointRequested(int pointIndex);
     void importCdfJointAnglesRequested();
@@ -160,6 +162,10 @@ private:
 
     QTabWidget* m_tabs = nullptr;
     QSpinBox* m_graphMaxPaths = nullptr;
+    QSpinBox* m_graphPerStartPaths = nullptr;
+    QTabWidget* m_graphResultTabs = nullptr;
+    QTableWidget* m_graphStartResults = nullptr;
+    QTableWidget* activeGraphTable() const;
     QLineEdit* m_graphWeights = nullptr;
     QPushButton* m_graphFilter = nullptr;
     QPushButton* m_graphUse = nullptr;

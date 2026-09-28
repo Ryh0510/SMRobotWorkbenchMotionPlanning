@@ -544,6 +544,11 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
     m_graphMaxPaths->setObjectName(QStringLiteral("layeredGraphMaxPaths"));
     m_graphMaxPaths->setRange(1, 200); m_graphMaxPaths->setValue(30);
     graphForm->addRow(QStringLiteral("\u5019\u9009\u6570 M"), m_graphMaxPaths);
+    m_graphPerStartPaths = new QSpinBox(basicPage);
+    m_graphPerStartPaths->setObjectName(QStringLiteral("layeredGraphPerStartPaths"));
+    m_graphPerStartPaths->setRange(1, 200); m_graphPerStartPaths->setValue(1);
+    m_graphPerStartPaths->setToolTip(QStringLiteral("\u6bcf\u4e2a\u8d77\u70b9\u72ec\u7acb\u4fdd\u7559 K \u6761\uff1bK=1 \u5f97\u5230\u6bcf\u4e2a\u8d77\u70b9\u5404\u81ea\u6700\u4f18\u7684\u4e00\u6761\u3002"));
+    graphForm->addRow(QStringLiteral("\u6bcf\u8d77\u70b9\u4fdd\u7559 K \u6761"), m_graphPerStartPaths);
     m_graphWeights = new QLineEdit(QStringLiteral("1, 1, 1, 1, 1, 1"), basicPage);
     m_graphWeights->setObjectName(QStringLiteral("layeredGraphWeights"));
     graphForm->addRow(QStringLiteral("J1..J6 \u6743\u91cd"), m_graphWeights);
@@ -559,12 +564,29 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
     m_graphResults->setObjectName(QStringLiteral("layeredGraphResults"));
     configureTrajectoryTable(m_graphResults, {QStringLiteral("\u6392\u540d"), QStringLiteral("\u603b\u4ee3\u4ef7 (rad^2)"),
         QStringLiteral("\u70b9\u6570"), QStringLiteral("\u9996\u70b9\u89e3"), QStringLiteral("\u672b\u70b9\u89e3")}, 160);
-    layout->addWidget(m_graphResults);
+    m_graphResultTabs = new QTabWidget(basicPage);
+    m_graphResultTabs->setObjectName(QStringLiteral("layeredGraphResultTabs"));
+    auto* globalPage = new QWidget(m_graphResultTabs);
+    auto* globalLayout = new QVBoxLayout(globalPage);
+    auto* globalNote = new QLabel(QStringLiteral("\u5168\u5c40\u6700\u4f18\uff1a\u8d77\u70b9\u4e0d\u9650\uff0c\u6240\u6709\u5b8c\u6574\u5e8f\u5217\u7edf\u4e00\u6392\u540d\uff0c\u524d M \u6761\u53ef\u80fd\u5171\u4eab\u540c\u4e00\u8d77\u70b9\u3002"), globalPage);
+    globalNote->setWordWrap(true); globalLayout->addWidget(globalNote); globalLayout->addWidget(m_graphResults);
+    auto* startPage = new QWidget(m_graphResultTabs);
+    auto* startLayout = new QVBoxLayout(startPage);
+    auto* startNote = new QLabel(QStringLiteral("\u6309\u8d77\u70b9\u6700\u4f18\uff1a\u56fa\u5b9a\u6bcf\u4e2a\u8d77\u70b9\u9006\u89e3\uff0c\u5206\u522b\u6c42\u524d K \u6761\uff1bK=1 \u5373\u5404\u8d77\u70b9\u6700\u4f18\u8f68\u8ff9\u3002\u5168\u5c40 >M \u8868\u793a\u672a\u8fdb\u5165\u5168\u5c40\u524d M \u6761\uff0c\u7cbe\u786e\u540d\u6b21\u672a\u8ba1\u7b97\u3002\u4e24\u9875\u5747\u672a\u505a\u78b0\u649e\u68c0\u67e5\u3002"), startPage);
+    startNote->setWordWrap(true); startLayout->addWidget(startNote);
+    m_graphStartResults = new QTableWidget(startPage);
+    m_graphStartResults->setObjectName(QStringLiteral("layeredGraphStartResults"));
+    configureTrajectoryTable(m_graphStartResults, {QStringLiteral("\u8d77\u70b9\u9006\u89e3"), QStringLiteral("\u7ec4\u5185\u6392\u540d"),
+        QStringLiteral("\u5168\u5c40\u6392\u540d"), QStringLiteral("\u603b\u4ee3\u4ef7 (rad^2)"), QStringLiteral("\u70b9\u6570"), QStringLiteral("\u672b\u70b9\u89e3")}, 160);
+    startLayout->addWidget(m_graphStartResults);
+    m_graphResultTabs->addTab(globalPage, QStringLiteral("\u5168\u5c40 Top-M"));
+    m_graphResultTabs->addTab(startPage, QStringLiteral("\u6309\u8d77\u70b9 Top-K"));
+    layout->addWidget(m_graphResultTabs);
     m_graphView = new QPushButton(QStringLiteral("\u67e5\u770b\u6784\u578b\u9009\u62e9"), basicPage);
     m_graphView->setObjectName(QStringLiteral("viewConfigurationSelection"));
     layout->addWidget(m_graphView);
     connect(m_graphView, &QPushButton::clicked, this,
-        [this]() { emit configurationSelectionRequested(m_graphResults->currentRow()); });
+        [this]() { emit configurationSelectionRequested(activeGraphTable()->currentRow(), m_graphResultTabs->currentIndex() == 1); });
     m_graphPath = new QTableWidget(basicPage);
     m_graphPath->setObjectName(QStringLiteral("layeredGraphPath"));
     configureTrajectoryTable(m_graphPath, {QStringLiteral("\u70b9"), QStringLiteral("t (s)"), QStringLiteral("\u89e3"),
@@ -583,18 +605,23 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
             }
             weights.push_back(value);
         }
-        emit layeredGraphRequested(m_graphMaxPaths->value(), weights);
+        emit layeredGraphRequested(m_graphMaxPaths->value(), weights, m_graphPerStartPaths->value());
     });
     connect(m_graphMaxPaths, QOverload<int>::of(&QSpinBox::valueChanged), this,
         [this](int) { emit layeredGraphSettingsChanged(); });
+    connect(m_graphPerStartPaths, QOverload<int>::of(&QSpinBox::valueChanged), this,
+        [this](int) { emit layeredGraphSettingsChanged(); });
     connect(m_graphWeights, &QLineEdit::textChanged, this,
         [this](const QString&) { emit layeredGraphSettingsChanged(); });
-    connect(m_graphResults, &QTableWidget::itemSelectionChanged, this, [this]() {
+    const auto graphSelection = [this]() {
         updateTrajectoryActions();
-        emit layeredGraphSelectionChanged(m_graphResults->currentRow());
-    });
+        emit layeredGraphSelectionChanged(activeGraphTable()->currentRow(), m_graphResultTabs->currentIndex() == 1);
+    };
+    connect(m_graphResults, &QTableWidget::itemSelectionChanged, this, graphSelection);
+    connect(m_graphStartResults, &QTableWidget::itemSelectionChanged, this, graphSelection);
+    connect(m_graphResultTabs, &QTabWidget::currentChanged, this, graphSelection);
     connect(m_graphUse, &QPushButton::clicked, this,
-        [this]() { emit useLayeredGraphResultRequested(m_graphResults->currentRow()); });
+        [this]() { emit useLayeredGraphResultRequested(activeGraphTable()->currentRow(), m_graphResultTabs->currentIndex() == 1); });
 
     m_sprayRangeVisible = new QCheckBox(QStringLiteral("Show spray range"), basicPage);
     layout->addWidget(m_sprayRangeVisible);
@@ -1067,10 +1094,11 @@ void MotionPlanningEditorWidget::updateTrajectoryActions()
 
     if(m_graphFilter) {
         m_graphFilter->setEnabled(m_graphBusy || (!m_multiIkBusy && m_multiIkComplete && !m_playbackActive));
-        m_graphView->setEnabled(!m_graphBusy && !m_multiIkBusy && m_graphResults->rowCount() > 0);
+        m_graphView->setEnabled(!m_graphBusy && !m_multiIkBusy && (m_graphResults->rowCount() > 0 || m_graphStartResults->rowCount() > 0));
         m_graphMaxPaths->setEnabled(!m_graphBusy);
+        m_graphPerStartPaths->setEnabled(!m_graphBusy);
         m_graphWeights->setEnabled(!m_graphBusy);
-        m_graphUse->setEnabled(!m_graphBusy && !m_multiIkBusy && m_multiIkComplete && m_graphResults->currentRow() >= 0);
+        m_graphUse->setEnabled(!m_graphBusy && !m_multiIkBusy && m_multiIkComplete && activeGraphTable()->currentRow() >= 0);
     }
     if(m_allIkButton) {
         m_allIkButton->setEnabled(m_multiIkBusy || (hasRobot && hasCartesian && !m_playbackActive));
@@ -1228,22 +1256,30 @@ void MotionPlanningEditorWidget::setMultiIkPointLabel(int point, const QString& 
     m_multiIkPoint->setItemText(point, label);
 }
 
-void MotionPlanningEditorWidget::showConfigurationSelection(const QVector<QVector<int>>& sequences, int initialRank)
+QTableWidget* MotionPlanningEditorWidget::activeGraphTable() const
 {
-    if(sequences.isEmpty()) { return; }
+    return m_graphResultTabs->currentIndex() == 1 ? m_graphStartResults : m_graphResults;
+}
+
+void MotionPlanningEditorWidget::showConfigurationSelection(const QVector<QVector<int>>& sequences,
+    const QVector<QVector<int>>& startSequences, const QStringList& startLabels, int initialRank, bool byStart)
+{
+    if(sequences.isEmpty() && startSequences.isEmpty()) { return; }
     if(!m_configurationDialog) {
-        m_configurationDialog = new ConfigurationSelectionDialog(sequences, initialRank, this);
+        m_configurationDialog = new ConfigurationSelectionDialog(sequences, startSequences, startLabels, initialRank, byStart, this);
     }
+    static_cast<ConfigurationSelectionDialog*>(m_configurationDialog.data())->selectPage(byStart);
     m_configurationDialog->show();
     m_configurationDialog->raise();
     m_configurationDialog->activateWindow();
 }
 
-void MotionPlanningEditorWidget::setLayeredGraphResults(const QVector<QStringList>& rows, const QString& summary)
+void MotionPlanningEditorWidget::setLayeredGraphResults(const QVector<QStringList>& rows, const QString& summary,
+    const QVector<QStringList>& startRows)
 {
     if(m_configurationDialog) { m_configurationDialog->close(); m_configurationDialog.clear(); }
     {
-        const QSignalBlocker blocker(m_graphResults);
+        const QSignalBlocker blocker(m_graphResults), startBlocker(m_graphStartResults);
         m_graphResults->setUpdatesEnabled(false);
         m_graphResults->clearContents(); m_graphResults->setRowCount(rows.size());
         for(int r = 0; r < rows.size(); ++r) {
@@ -1252,10 +1288,19 @@ void MotionPlanningEditorWidget::setLayeredGraphResults(const QVector<QStringLis
             }
         }
         m_graphResults->setUpdatesEnabled(true);
+        m_graphStartResults->setUpdatesEnabled(false);
+        m_graphStartResults->clearContents(); m_graphStartResults->setRowCount(startRows.size());
+        for(int r = 0; r < startRows.size(); ++r) {
+            for(int c = 0; c < startRows[r].size(); ++c) {
+                m_graphStartResults->setItem(r, c, makeReadOnlyItem(startRows[r][c]));
+            }
+        }
+        m_graphStartResults->setUpdatesEnabled(true);
         m_graphPath->setRowCount(0);
         m_graphStatus->setText(summary);
     }
     if(!rows.empty()) { m_graphResults->selectRow(0); }
+    if(!startRows.empty()) { m_graphStartResults->selectRow(0); }
     updateTrajectoryActions();
 }
 

@@ -1,3 +1,4 @@
+#include <map>
 #include "MotionPlanningModuleController.h"
 
 #include "MotionPlanningEditorWidget.h"
@@ -476,17 +477,22 @@ namespace robot_qt_viewer
             this, &MotionPlanningModuleController::invalidateLayeredGraph);
         connect(&m_widget, &MotionPlanningEditorWidget::layeredGraphSelectionChanged,
             this, &MotionPlanningModuleController::showLayeredGraphPath);
-        connect(&m_widget, &MotionPlanningEditorWidget::configurationSelectionRequested, this, [this](int row) {
+        connect(&m_widget, &MotionPlanningEditorWidget::configurationSelectionRequested, this, [this](int row, bool byStart) {
             if(m_graphThread || !m_graphResult || !m_graphResult->success) { return; }
-            QVector<QVector<int>> sequences;
-            sequences.reserve(static_cast<int>(m_graphResult->paths.size()));
-            for(const auto& path : m_graphResult->paths) {
-                QVector<int> sequence;
-                sequence.reserve(static_cast<int>(path.selections.size()));
-                for(std::size_t index : path.selections) { sequence.push_back(static_cast<int>(index + 1)); }
-                sequences.push_back(std::move(sequence));
-            }
-            m_widget.showConfigurationSelection(sequences, row);
+            const auto project = [](const motion_planning::LayeredIkGraphResult* result) {
+                QVector<QVector<int>> sequences;
+                if(!result || !result->success) { return sequences; }
+                sequences.reserve(static_cast<int>(result->paths.size()));
+                for(const auto& path : result->paths) {
+                    QVector<int> sequence;
+                    sequence.reserve(static_cast<int>(path.selections.size()));
+                    for(std::size_t index : path.selections) { sequence.push_back(static_cast<int>(index + 1)); }
+                    sequences.push_back(std::move(sequence));
+                }
+                return sequences;
+            };
+            m_widget.showConfigurationSelection(project(m_graphResult.get()), project(m_graphStartResult.get()),
+                m_graphStartLabels, row, byStart);
         });
         connect(&m_widget, &MotionPlanningEditorWidget::useLayeredGraphResultRequested,
             this, &MotionPlanningModuleController::useLayeredGraphResult);
@@ -2353,11 +2359,11 @@ namespace robot_qt_viewer
     void MotionPlanningModuleController::invalidateLayeredGraph()
     {
         if(m_graphCancel) { m_graphCancel->store(true); }
-        m_graphResult.reset();
+        m_graphResult.reset(); m_graphStartResult.reset(); m_graphStartLabels.clear();
         m_widget.setLayeredGraphResults({}, QStringLiteral("\u8bf7\u4f7f\u7528\u5f53\u524d\u591a\u9006\u89e3\u7ed3\u679c\u8fdb\u884c\u5206\u5c42\u56fe\u7b5b\u9009\u3002"));
     }
 
-    void MotionPlanningModuleController::filterLayeredGraph(int maxPaths, const QVector<double>& weights)
+    void MotionPlanningModuleController::filterLayeredGraph(int maxPaths, const QVector<double>& weights, int perStartPaths)
     {
         if(m_graphThread || m_multiIkThread || !m_multiIkResult || !m_multiIkResult->success) { return; }
         stopJointPlayback();
@@ -2377,14 +2383,26 @@ namespace robot_qt_viewer
         };
         auto input = std::make_shared<motion_planning::CartesianMultiIkResult>(*m_multiIkResult);
         auto output = std::make_shared<motion_planning::LayeredIkGraphResult>();
+        auto startOutput = std::make_shared<motion_planning::LayeredIkGraphResult>();
         m_widget.setLayeredGraphBusy(true, QStringLiteral("\u6b63\u5728\u8ba1\u7b97 Top-M \u5b8c\u6574\u6784\u578b\u5e8f\u5217..."));
-        m_graphThread = QThread::create([input, output, options]() {
-            try { *output = motion_planning::ProjectLayeredIkGraph::filter(*input, options); }
-            catch(const std::exception& error) { output->message = error.what(); }
-            catch(...) { output->message = "Layered graph search failed unexpectedly."; }
+        m_graphThread = QThread::create([input, output, startOutput, options, perStartPaths]() {
+            try {
+                *output = motion_planning::ProjectLayeredIkGraph::filter(*input, options);
+                if(output->success) {
+                    auto startOptions = options;
+                    startOptions.maxPaths = perStartPaths > 0 ? static_cast<std::size_t>(perStartPaths) : 0;
+                    *startOutput = motion_planning::ProjectLayeredIkGraph::filterByStart(*input, startOptions);
+                }
+            }
+            catch(const std::exception& error) {
+                (output->success ? startOutput : output)->message = error.what();
+            }
+            catch(...) {
+                (output->success ? startOutput : output)->message = "Layered graph search failed unexpectedly.";
+            }
         });
         m_graphThread->setParent(this);
-        connect(m_graphThread, &QThread::finished, this, [this, cancel, output]() {
+        connect(m_graphThread, &QThread::finished, this, [this, cancel, output, startOutput, perStartPaths]() {
             m_graphThread->deleteLater(); m_graphThread = nullptr; m_graphCancel.reset();
             if(cancel->load()) {
                 m_widget.setLayeredGraphBusy(false, QStringLiteral("\u5206\u5c42\u56fe\u7b5b\u9009\u5df2\u53d6\u6d88\u3002")); return;
@@ -2406,17 +2424,44 @@ namespace robot_qt_viewer
                     summary += QStringLiteral("\n\u6ce8\u610f\uff1a\u8f93\u5165\u591a\u9006\u89e3\u5b58\u5728\u622a\u65ad\u3002");
                 }
             }
-            m_widget.setLayeredGraphResults(rows, summary);
+            m_graphStartResult = std::make_unique<motion_planning::LayeredIkGraphResult>(std::move(*startOutput));
+            QVector<QStringList> startRows;
+            std::map<std::vector<std::size_t>, std::size_t> globalRanks;
+            for(std::size_t i = 0; i < m_graphResult->paths.size(); ++i) {
+                globalRanks.emplace(m_graphResult->paths[i].selections, i + 1);
+            }
+            std::size_t lastStart = std::numeric_limits<std::size_t>::max(), groupRank = 0, groups = 0;
+            for(const auto& path : m_graphStartResult->paths) {
+                const auto start = path.selections.front();
+                if(start != lastStart) { groupRank = 0; ++groups; lastStart = start; }
+                ++groupRank;
+                const auto found = globalRanks.find(path.selections);
+                const auto globalRank = found != globalRanks.end() ? QString::number(found->second) :
+                    QStringLiteral(">%1").arg(m_graphResult->paths.size());
+                startRows.push_back({QString::number(start + 1), QString::number(groupRank), globalRank,
+                    QString::number(path.cost, 'g', 15), QString::number(path.selections.size()),
+                    QString::number(path.selections.back() + 1)});
+                m_graphStartLabels << QStringLiteral("\u8d77\u70b9 #%1 / \u7ec4\u5185 #%2 / \u5168\u5c40 %3")
+                    .arg(start + 1).arg(groupRank).arg(globalRank);
+            }
+            if(m_graphStartResult->success) {
+                summary += QStringLiteral("\n\u53e6\u5df2\u8ba1\u7b97 %1 \u4e2a\u8d77\u70b9\uff0c\u5404\u4fdd\u7559\u81f3\u591a %2 \u6761\uff0c\u5171 %3 \u6761\uff08\u7b2c\u4e8c\u9875\uff09\u3002")
+                    .arg(groups).arg(perStartPaths).arg(startRows.size());
+            } else if(m_graphResult->success) {
+                summary += QStringLiteral("\n\u6309\u8d77\u70b9\u8ba1\u7b97\u5931\u8d25\uff1a") + QString::fromStdString(m_graphStartResult->message);
+            }
+            m_widget.setLayeredGraphResults(rows, summary, startRows);
             m_widget.setLayeredGraphBusy(false, summary);
         });
         m_graphThread->start();
     }
 
-    void MotionPlanningModuleController::showLayeredGraphPath(int row)
+    void MotionPlanningModuleController::showLayeredGraphPath(int row, bool byStart)
     {
         QVector<QStringList> rows;
-        if(m_graphResult && m_multiIkResult && row >= 0 && row < static_cast<int>(m_graphResult->paths.size())) {
-            const auto& path = m_graphResult->paths[row];
+        const auto* result = byStart ? m_graphStartResult.get() : m_graphResult.get();
+        if(result && m_multiIkResult && row >= 0 && row < static_cast<int>(result->paths.size())) {
+            const auto& path = result->paths[row];
             for(std::size_t i = 0; i < path.selections.size(); ++i) {
                 const auto& layer = m_multiIkResult->layers[i];
                 const auto& candidate = layer.candidates[path.selections[i]];
@@ -2430,14 +2475,15 @@ namespace robot_qt_viewer
         m_widget.setLayeredGraphPath(rows);
     }
 
-    void MotionPlanningModuleController::useLayeredGraphResult(int row)
+    void MotionPlanningModuleController::useLayeredGraphResult(int row, bool byStart)
     {
-        if(m_graphThread || m_multiIkThread || !m_multiIkResult || !m_graphResult || !m_graphResult->success ||
-            row < 0 || row >= static_cast<int>(m_graphResult->paths.size())) { return; }
+        const auto* result = byStart ? m_graphStartResult.get() : m_graphResult.get();
+        if(m_graphThread || m_multiIkThread || !m_multiIkResult || !result || !result->success ||
+            row < 0 || row >= static_cast<int>(result->paths.size())) { return; }
         motion_planning::StoredMotionPlan selected;
         std::string error;
         if(!motion_planning::ProjectTrajectoryInverseKinematics::selectMultiIkTrajectory(
-            *m_multiIkResult, m_graphResult->paths[row].selections, selected, error)) {
+            *m_multiIkResult, result->paths[row].selections, selected, error)) {
             m_widget.setCdfResult(QString::fromStdString(error), false); return;
         }
         if(selected.robotId != m_selectedRobotId.toStdString() ||
@@ -2446,9 +2492,10 @@ namespace robot_qt_viewer
         }
         stopJointPlayback();
         m_graphCdfRobotId = m_selectedRobotId;
-        m_cdfSourceName = QStringLiteral("%1 | Top-M #%2 | cost=%3")
-            .arg(QString::fromStdString(selected.name.empty() ? selected.id : selected.name)).arg(row + 1)
-            .arg(m_graphResult->paths[row].cost, 0, 'g', 12);
+        const QString label = byStart ? m_graphStartLabels.value(row) : QStringLiteral("\u5168\u5c40 Top-M #%1").arg(row + 1);
+        m_cdfSourceName = QStringLiteral("%1 | %2 | cost=%3")
+            .arg(QString::fromStdString(selected.name.empty() ? selected.id : selected.name)).arg(label)
+            .arg(result->paths[row].cost, 0, 'g', 12);
         m_cdfJointNames = selected.jointNames;
         m_cdfJointPoints.clear();
         m_cdfJointPoints.reserve(selected.trajectory.points.size());
@@ -2457,8 +2504,8 @@ namespace robot_qt_viewer
         }
         refreshCdfJointAngleView();
         m_widget.setCdfExportAvailable(false);
-        m_widget.setCdfResult(QStringLiteral("\u5df2\u5c06\u7b2c %1 \u7ec4\u7684 %2 \u4e2a\u70b9\u8bbe\u4e3a\u521d\u59cb\u89e3\uff0c\u53ef\u6267\u884c APF + CDF/QP\u3002")
-            .arg(row + 1).arg(static_cast<qulonglong>(m_cdfJointPoints.size())), true);
+        m_widget.setCdfResult(QStringLiteral("\u5df2\u5c06 %1 \u7684 %2 \u4e2a\u70b9\u8bbe\u4e3a\u521d\u59cb\u89e3\uff0c\u53ef\u6267\u884c APF + CDF/QP\u3002")
+            .arg(label).arg(static_cast<qulonglong>(m_cdfJointPoints.size())), true);
         m_widget.showCdfPage();
     }
 
