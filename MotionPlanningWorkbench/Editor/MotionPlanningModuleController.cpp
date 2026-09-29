@@ -20,6 +20,15 @@
 #include <SimulationProject/ProjectDocumentService.h>
 #include <SimulationProject/RuntimePaths.h>
 
+#include <QCoreApplication>
+#include <QDateTime>
+#include <QDialog>
+#include <QDir>
+#include <QFile>
+#include <QLabel>
+#include <QPlainTextEdit>
+#include <QStandardPaths>
+#include <QVBoxLayout>
 #include <QFileDialog>
 #include <QLocale>
 #include <QSaveFile>
@@ -30,6 +39,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <filesystem>
 #include <limits>
 #include <string>
@@ -38,6 +48,15 @@
 
 namespace
 {
+    // Keep task-owned widgets and snapshot alive until the worker has joined.
+    // No event pumping occurs inside a collision or solver call.
+    class CdfProgressDialog final : public QDialog
+    {
+    public:
+        using QDialog::QDialog;
+        void reject() override {}
+    };
+
     constexpr double kPi = 3.14159265358979323846;
 
     bool parseJointVector(
@@ -1133,22 +1152,134 @@ namespace robot_qt_viewer
             return;
         }
 
-        const motion_planning::ProjectCdfQpTrajectoryRepairService repairService;
-        motion_planning::ProjectCdfQpRepairResult repairResult =
-            repairService.repair(
-                m_context.document(),
-                projectBasePath(m_context.projectSession()),
-                robotId,
-                robotJointNames,
-                seedTrajectory,
-                options);
+        // Execute against a private immutable project snapshot. The modal task
+        // window prevents concurrent user edits while still repainting/timing.
+        const auto document = m_context.document();
+        const auto basePath = projectBasePath(m_context.projectSession());
+        const QString sourceName = m_cdfSourceName;
+        QString logDirectory = QCoreApplication::applicationDirPath() + QStringLiteral("/log/cdf");
+        if(!QDir().mkpath(logDirectory)) {
+            logDirectory = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
+                + QStringLiteral("/log/cdf");
+            QDir().mkpath(logDirectory);
+        }
+        const QString logPath = logDirectory + QStringLiteral("/cdf_%1_%2.log")
+            .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss_zzz")))
+            .arg(QCoreApplication::applicationPid());
+        CdfProgressDialog dialog(&m_widget);
+        dialog.setObjectName(QStringLiteral("cdfRepairProgress"));
+        dialog.setWindowTitle(QStringLiteral("APF + CDF/QP"));
+        dialog.setWindowFlags(dialog.windowFlags() & ~Qt::WindowCloseButtonHint);
+        dialog.setWindowModality(Qt::ApplicationModal);
+        auto* layout = new QVBoxLayout(&dialog);
+        auto* elapsedLabel = new QLabel(&dialog);
+        elapsedLabel->setWordWrap(true);
+        elapsedLabel->setTextFormat(Qt::PlainText);
+        auto* history = new QPlainTextEdit(&dialog);
+        history->setReadOnly(true);
+        history->setMaximumBlockCount(400);
+        auto* logLabel = new QLabel(QStringLiteral("Log: %1").arg(logPath), &dialog);
+        logLabel->setWordWrap(true);
+        logLabel->setTextFormat(Qt::PlainText);
+        logLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        layout->addWidget(elapsedLabel);
+        layout->addWidget(history);
+        layout->addWidget(logLabel);
+        dialog.resize(730, 350);
+        const auto started = std::chrono::steady_clock::now();
+        auto elapsedSeconds = [started]() {
+            return std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+        };
+        QString phase = QStringLiteral("Preparing planning scenes");
+        auto updateElapsed = [&]() {
+            const auto elapsed = static_cast<qint64>(elapsedSeconds());
+            elapsedLabel->setText(QStringLiteral("%1:%2 | %3 | Input: %4 points")
+                .arg(elapsed / 60).arg(elapsed % 60, 2, 10, QLatin1Char('0'))
+                .arg(phase).arg(static_cast<qulonglong>(seedTrajectory.points.size())));
+        };
+        QTimer elapsedTimer;
+        connect(&elapsedTimer, &QTimer::timeout, &dialog, updateElapsed);
+        updateElapsed();
+        elapsedTimer.start(1000);
+        bool sourceChanged = false;
+        for(const auto kind : {RobotQtViewerEventKind::ProjectOpened,
+            RobotQtViewerEventKind::ProjectDocumentChanged, RobotQtViewerEventKind::AttachmentChanged,
+            RobotQtViewerEventKind::CollisionChanged, RobotQtViewerEventKind::ToolSetupChanged}) {
+            m_context.eventHub().subscribe(kind, &dialog, [&](const auto&) { sourceChanged = true; });
+        }
+        motion_planning::ProjectCdfQpRepairResult repairResult;
+        const QString executable = QCoreApplication::applicationFilePath();
+#ifdef NDEBUG
+        const QString buildMode = QStringLiteral("Release");
+#else
+        const QString buildMode = QStringLiteral("Debug");
+#endif
+        std::unique_ptr<QThread> worker(QThread::create([&, options]() mutable {
+            QFile log(logPath);
+            const bool logOpened = log.open(QIODevice::WriteOnly | QIODevice::Text);
+            double lastEventSeconds = 0.0;
+            auto report = [&](const QString& message) {
+                const double elapsed = elapsedSeconds();
+                const QString line = QStringLiteral("[%1 s; +%2 s] %3")
+                    .arg(elapsed, 0, 'f', 3).arg(elapsed - lastEventSeconds, 0, 'f', 3).arg(message);
+                lastEventSeconds = elapsed;
+                if(logOpened) { log.write(line.toUtf8()); log.write("\n"); log.flush(); }
+                QMetaObject::invokeMethod(&dialog, [&, message, line]() {
+                    phase = message;
+                    history->appendPlainText(line);
+                    updateElapsed();
+                }, Qt::QueuedConnection);
+            };
+            report(QStringLiteral("CDF performance v2 | %1 | %2").arg(buildMode, executable));
+            report(QStringLiteral("Source: %1 | robot: %2 | input points: %3 | base: %4")
+                .arg(sourceName, QString::fromStdString(robotId))
+                .arg(static_cast<qulonglong>(seedTrajectory.points.size()))
+                .arg(QString::fromStdWString(basePath.wstring())));
+            report(QStringLiteral("QP rounds=%1, safety=%2, clearance=%3, distance horizon=%4, FD=%5, trust=%6, corridor=%7, seed weight=%8, intermediate=%9, endpoints=%10, smoothing=%11, optimization step=%12, collision step=%13")
+                .arg(options.maxIterations).arg(options.safetyMargin).arg(options.targetClearance)
+                .arg(options.distanceThreshold).arg(options.finiteDifferenceStep).arg(options.trustRegion)
+                .arg(options.seedCorridor).arg(options.seedTrackingWeight).arg(options.segmentIntermediateSamples)
+                .arg(options.keepEndpoints).arg(options.postSmoothingIterations)
+                .arg(options.optimizationMaxJointStep).arg(std::min(options.validationMaxJointStep, 0.001)));
+            if(!logOpened) report(QStringLiteral("Cannot write log: %1").arg(log.errorString()));
+            options.progress = [&](const std::string& message) { report(QString::fromStdString(message)); };
+            try {
+                repairResult = motion_planning::ProjectCdfQpTrajectoryRepairService().repair(
+                    document, basePath, robotId, robotJointNames, seedTrajectory, options);
+                for(const auto& diagnostic : repairResult.diagnostics) {
+                    report(QString::fromStdString(diagnostic.code + ": " + diagnostic.message));
+                }
+            } catch(const std::exception& error) {
+                repairResult = {};
+                repairResult.diagnostics.push_back({"cdf_exception", error.what()});
+                report(QString::fromUtf8(error.what()));
+            } catch(...) {
+                repairResult = {};
+                repairResult.diagnostics.push_back({"cdf_exception", "Unexpected CDF/QP worker failure."});
+                report(QStringLiteral("Unexpected CDF/QP worker failure"));
+            }
+            report(QStringLiteral("Finished: success=%1, output points=%2")
+                .arg(repairResult.success).arg(static_cast<qulonglong>(repairResult.plan.trajectory.points.size())));
+        }));
+        connect(worker.get(), &QThread::finished, &dialog, &QDialog::accept, Qt::QueuedConnection);
+        worker->start();
+        dialog.exec();
+        worker->wait();
+        elapsedTimer.stop();
+        m_context.eventHub().unsubscribe(&dialog);
+        const QString timingSummary = QStringLiteral(" | %1 s | Log: %2")
+            .arg(elapsedSeconds(), 0, 'f', 1).arg(logPath);
+        if(sourceChanged || m_selectedRobotId.toStdString() != robotId) {
+            m_widget.setCdfResult(QStringLiteral("Project changed during repair; result was not applied.") + timingSummary, false);
+            return;
+        }
 
         if(repairResult.plan.trajectory.empty()) {
             const QString message = repairResult.diagnostics.empty()
                 ? QStringLiteral("APF + CDF/QP repair failed before producing a trajectory.")
                 : QString::fromStdString(repairResult.diagnostics.back().message);
-            m_widget.setCdfResult(message, false);
-            emit statusMessageRequested(message, 7000);
+            m_widget.setCdfResult(message + timingSummary, false);
+            emit statusMessageRequested(message + timingSummary, 7000);
             return;
         }
 
@@ -1188,7 +1319,7 @@ namespace robot_qt_viewer
             : QStringLiteral(" %1").arg(repairResult.diagnostics.empty()
                 ? QStringLiteral("The repaired path still violates the requested clearance.")
                 : QString::fromStdString(repairResult.diagnostics.back().message));
-        const QString summary = cdfRepairSummary(repairResult, planId) + diagnosticText;
+        const QString summary = cdfRepairSummary(repairResult, planId) + diagnosticText + timingSummary;
         m_widget.setCdfResult(summary, repairResult.success);
         emit trajectoryPlanned(planId);
         emit statusMessageRequested(summary, repairResult.success ? 6000 : 9000);
