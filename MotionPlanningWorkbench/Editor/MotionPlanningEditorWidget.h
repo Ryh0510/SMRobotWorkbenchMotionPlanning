@@ -6,6 +6,7 @@
 #include <QVector>
 #include <QWidget>
 
+struct ConfigurationSelectionCatalog;
 class QDialog;
 class QDoubleSpinBox;
 class QCheckBox;
@@ -84,7 +85,7 @@ public:
     void setLayeredGraphPath(const QVector<QStringList>& rows);
     void setLayeredGraphBusy(bool busy, const QString& message);
     void showConfigurationSelection(const QVector<QVector<int>>& sequences,
-        const QVector<QVector<int>>& startSequences, const QStringList& startLabels, int initialRank, bool byStart);
+        const QVector<QVector<int>>& startSequences, const QStringList& startLabels, int initialRank, bool byStart, const ConfigurationSelectionCatalog& catalog);
     void showCdfPage();
 
     void setRobotId(const QString& robotId);

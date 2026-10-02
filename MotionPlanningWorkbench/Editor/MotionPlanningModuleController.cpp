@@ -1,5 +1,6 @@
 #include <map>
 #include "MotionPlanningModuleController.h"
+#include "ConfigurationSelectionDialog.h"
 
 #include "MotionPlanningEditorWidget.h"
 #include "RobotQtViewerDocumentContext.h"
@@ -268,6 +269,47 @@ namespace
             robotIt->id.find("4600") != std::string::npos;
     }
 
+    QString configurationLabel(const motion_planning::CartesianIkConfiguration& config)
+    {
+        if(!config.available) { return QStringLiteral("\u672a\u5206\u7c7b"); }
+        const auto sign = [](int value) { return value > 0 ? QStringLiteral("+") :
+            value < 0 ? QStringLiteral("-") : QStringLiteral("0"); };
+        return (config.stableId() ? QStringLiteral("B%1 ").arg(config.stableId()) : QStringLiteral("\u8fb9\u754c ")) +
+            QStringLiteral("\u80a9%1 / \u8098%2 / \u8155%3").arg(sign(config.shoulder), sign(config.elbow), sign(config.wrist));
+    }
+
+    ConfigurationSelectionCatalog configurationCatalog(const motion_planning::CartesianMultiIkResult& result)
+    {
+        ConfigurationSelectionCatalog catalog;
+        const bool classified = std::any_of(result.layers.begin(), result.layers.end(), [](const auto& layer) {
+            return std::any_of(layer.candidates.begin(), layer.candidates.end(),
+                [](const auto& candidate) { return candidate.configuration.available; });
+        });
+        if(!classified) { return catalog; }
+        for(int i = 0; i < 8; ++i) {
+            catalog.categoryLabels << configurationLabel({true, i & 4 ? -1 : 1, i & 2 ? -1 : 1, i & 1 ? -1 : 1});
+        }
+        bool boundary = false;
+        for(const auto& layer : result.layers) {
+            QVector<int> categories;
+            QStringList details;
+            for(std::size_t i = 0; i < layer.candidates.size(); ++i) {
+                const auto& candidate = layer.candidates[i];
+                const int id = candidate.configuration.stableId();
+                boundary |= id == 0;
+                categories << (id ? id : 9);
+                QStringList turns;
+                for(int turn : candidate.turns) { turns << QString::number(turn); }
+                details << QStringLiteral("%1 | \u5019\u9009%2 | turn=[%3]")
+                    .arg(configurationLabel(candidate.configuration)).arg(i + 1).arg(turns.join(QStringLiteral(",")));
+            }
+            catalog.categories << categories;
+            catalog.candidateDetails << details;
+        }
+        if(boundary) { catalog.categoryLabels << QStringLiteral("\u8fb9\u754c/\u672a\u5206\u7c7b"); }
+        return catalog;
+    }
+
     QString formatDouble(double value)
     {
         return QString::number(value, 'g', 8);
@@ -511,7 +553,7 @@ namespace robot_qt_viewer
                 return sequences;
             };
             m_widget.showConfigurationSelection(project(m_graphResult.get()), project(m_graphStartResult.get()),
-                m_graphStartLabels, row, byStart);
+                m_graphStartLabels, row, byStart, configurationCatalog(*m_multiIkResult));
         });
         connect(&m_widget, &MotionPlanningEditorWidget::useLayeredGraphResultRequested,
             this, &MotionPlanningModuleController::useLayeredGraphResult);
@@ -2364,6 +2406,11 @@ namespace robot_qt_viewer
                     options.lower[j] = std::max(options.lower[j], lower[j]);
                     options.upper[j] = std::min(options.upper[j], upper[j]);
                 }
+                if(mapSigns) {
+                    options.classifyConfiguration = motion_planning::ProjectTrajectoryInverseKinematics::createIrb4600ConfigurationClassifier(
+                        document, basePath, options.model.robotId, options.model.jointNames, mapSigns, output->message);
+                    if(!options.classifyConfiguration) { return; }
+                }
                 *output = motion_planning::ProjectTrajectoryInverseKinematics::solveAllCartesianControlPoints(plan, options);
             } catch(const std::exception& error) { output->message = error.what(); }
             catch(...) { output->message = "Multi IK failed unexpectedly."; }
@@ -2394,7 +2441,7 @@ namespace robot_qt_viewer
             QVector<MotionPlanningEditorWidget::MultiIkPointRow> rows;
             for(std::size_t i = 0; i < m_multiIkResult->layers.size(); ++i) { rows.push_back({multiIkPointLabel(i)}); }
             const QString summary = QString::fromStdString(m_multiIkResult->message) +
-                QStringLiteral("\n\u89e3\u7f16\u53f7\u4ec5\u5728\u5f53\u524d\u70b9\u6709\u6548\uff1b\u89d2\u5ea6\u4e3a\u539f IK \u7b26\u53f7\u3002\u8c03\u8bd5\u64ad\u653e\u672a\u505a\u907f\u969c\u89c4\u5212\u3002");
+                QStringLiteral("\nB1\uff5eB8 \u6309\u80a9/\u8098/\u8155\u56fa\u5b9a\u5206\u7c7b\uff08+\u5728\u524d\uff0c-\u5728\u540e\uff09\uff0c\u7f3a\u89e3\u4e0d\u91cd\u7f16\u53f7\u3002\u80a9+\u8868\u793a\u8155\u4e2d\u5fc3\u5728\u80a9\u90e8\u671d\u5411\u7684\u524d\u4fa7\uff1b\u8098/\u8155\u00b1\u8868\u793a\u6a21\u578b\u8f74\u5b9a\u4e49\u7684\u4e24\u4fa7\u51e0\u4f55\u5206\u652f\uff0c\u4e0d\u662f\u5173\u8282\u89d2\u6b63\u8d1f\u30020\u4e3a\u5206\u652f\u8fb9\u754c\u3002\u5019\u9009\u5e8f\u53f7\u548c turn \u72ec\u7acb\u4fdd\u7559\uff1b\u4ecd\u4f7f\u7528\u539f IK \u7b26\u53f7\uff0c\u64ad\u653e\u672a\u505a\u907f\u969c\u89c4\u5212\u3002");
             m_widget.setMultiIkPoints(rows, summary, m_multiIkResult->success);
             m_widget.setMultiIkBusy(false, summary);
             showMultiIkPoint(0);
@@ -2408,7 +2455,7 @@ namespace robot_qt_viewer
         return QStringLiteral("%1 | t=%2 | %3 \u7ec4 | \u64ad\u653e\u89e3: %4%5")
             .arg(static_cast<qulonglong>(point + 1)).arg(layer.time, 0, 'g', 8)
             .arg(static_cast<qulonglong>(layer.candidates.size()))
-            .arg(layer.candidates.empty() ? QStringLiteral("--") : QString::number(m_multiIkSelections[point] + 1))
+            .arg(layer.candidates.empty() ? QStringLiteral("--") : configurationLabel(layer.candidates[m_multiIkSelections[point]].configuration) + QStringLiteral(" [%1]").arg(m_multiIkSelections[point] + 1))
             .arg(layer.truncated ? QStringLiteral(" [\u5df2\u622a\u65ad]") : QString());
     }
 
@@ -2422,7 +2469,7 @@ namespace robot_qt_viewer
         for(std::size_t c = 0; c < layer.candidates.size(); ++c) {
             const auto& candidate = layer.candidates[c];
             QStringList columns;
-            columns << QStringLiteral("%1%2").arg(static_cast<qulonglong>(c + 1))
+            columns << QStringLiteral("%1 | #%2%3").arg(configurationLabel(candidate.configuration)).arg(static_cast<qulonglong>(c + 1))
                 .arg(c == m_multiIkSelections[point] ? QStringLiteral(" *") : QString());
             for(double q : candidate.joints) { columns << QString::number(q * 180 / kPi, 'f', 5); }
             QStringList turns;
@@ -2544,7 +2591,9 @@ namespace robot_qt_viewer
                 const auto& path = m_graphResult->paths[i];
                 rows.push_back({QString::number(i + 1), QString::number(path.cost, 'g', 15),
                     QString::number(path.selections.size()), QString::number(path.selections.front() + 1),
-                    QString::number(path.selections.back() + 1)});
+                    QString::number(path.selections.back() + 1),
+                    configurationLabel(m_multiIkResult->layers.front().candidates[path.selections.front()].configuration),
+                    configurationLabel(m_multiIkResult->layers.back().candidates[path.selections.back()].configuration)});
             }
             QString summary = QString::fromStdString(m_graphResult->message);
             if(m_graphResult->success) {
@@ -2571,9 +2620,12 @@ namespace robot_qt_viewer
                     QStringLiteral(">%1").arg(m_graphResult->paths.size());
                 startRows.push_back({QString::number(start + 1), QString::number(groupRank), globalRank,
                     QString::number(path.cost, 'g', 15), QString::number(path.selections.size()),
-                    QString::number(path.selections.back() + 1)});
+                    QString::number(path.selections.back() + 1),
+                    configurationLabel(m_multiIkResult->layers.front().candidates[path.selections.front()].configuration),
+                    configurationLabel(m_multiIkResult->layers.back().candidates[path.selections.back()].configuration)});
                 m_graphStartLabels << QStringLiteral("\u8d77\u70b9 #%1 / \u7ec4\u5185 #%2 / \u5168\u5c40 %3")
-                    .arg(start + 1).arg(groupRank).arg(globalRank);
+                    .arg(start + 1).arg(groupRank).arg(globalRank) + QStringLiteral(" | ") +
+                    configurationLabel(m_multiIkResult->layers.front().candidates[start].configuration);
             }
             if(m_graphStartResult->success) {
                 summary += QStringLiteral("\n\u53e6\u5df2\u8ba1\u7b97 %1 \u4e2a\u8d77\u70b9\uff0c\u5404\u4fdd\u7559\u81f3\u591a %2 \u6761\uff0c\u5171 %3 \u6761\uff08\u7b2c\u4e8c\u9875\uff09\u3002")
@@ -2600,7 +2652,7 @@ namespace robot_qt_viewer
                 for(double q : candidate.joints) { joints << QString::number(q * 180.0 / kPi, 'f', 6); }
                 for(int turn : candidate.turns) { turns << QString::number(turn); }
                 rows.push_back({QString::number(i + 1), QString::number(layer.time, 'g', 12),
-                    QString::number(path.selections[i] + 1), joints.join(QStringLiteral(", ")), turns.join(QStringLiteral(", "))});
+                    QString::number(path.selections[i] + 1), joints.join(QStringLiteral(", ")), turns.join(QStringLiteral(", ")), configurationLabel(candidate.configuration)});
             }
         }
         m_widget.setLayeredGraphPath(rows);
