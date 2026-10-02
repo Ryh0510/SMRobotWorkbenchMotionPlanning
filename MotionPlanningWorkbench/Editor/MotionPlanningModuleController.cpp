@@ -6,7 +6,7 @@
 #include "RobotQtViewerDocumentContext.h"
 #include "RobotQtViewerDocumentController.h"
 #include "RobotQtViewerSelectionModel.h"
-#include "RobotQtViewerViewportServices.h"
+#include "RobotQtViewerViewportPorts.h"
 #include "RobotQtViewerViewportPreviewState.h"
 
 #include <RobotQtViewerFileDialog.h>
@@ -951,7 +951,7 @@ namespace robot_qt_viewer
         options.stepSize = 1.0;
         options.damping = 0.001;
 
-        if(RobotQtViewerViewportServices* viewportServices = m_context.viewportServices()) {
+        if(IRobotQtViewerMotionPlanningViewportPort* viewportServices = m_context.motionPlanningViewport()) {
             for(const std::string& jointName : options.jointNames) {
                 bool ok = false;
                 const double value = viewportServices->robotJointValue(
@@ -966,10 +966,10 @@ namespace robot_qt_viewer
             }
         }
 
-        auto* viewportServices = m_context.viewportServices();
+        auto* viewportServices = m_context.motionPlanningViewport();
         const auto runtimeFk = viewportServices
             ? viewportServices->robotForwardKinematics(m_selectedRobotId, options.jointNames, useToolTransform)
-            : RobotQtViewerViewportServices::RobotForwardKinematics{};
+            : IRobotQtViewerMotionPlanningViewportPort::RobotForwardKinematics{};
         if(!runtimeFk) {
             m_widget.setResult(QStringLiteral("Cannot obtain the selected robot model and TCP for IK."), false);
             return;
@@ -1696,7 +1696,7 @@ namespace robot_qt_viewer
 
         const motion_planning::ProjectCdfQpRepairOptions cdfOptions;
         if(!m_multiIkPlayback && cdfDetectorIsConfigured(m_context.document(), m_selectedRobotId.toStdString(), cdfOptions)) {
-            if(RobotQtViewerViewportServices* viewportServices = m_context.viewportServices()) {
+            if(auto* viewportServices = m_context.collisionViewport()) {
                 viewportServices->refreshCollisionConfiguration(
                     m_context.document(),
                     projectBasePath(m_context.projectSession()));
@@ -1822,7 +1822,7 @@ namespace robot_qt_viewer
 
         // Sample only after every joint in this playback point has been applied.
         if(m_endEffectorTraceVisible) {
-            if(auto* services = m_context.viewportServices()) {
+            if(auto* services = m_context.motionPlanningViewport()) {
                 services->appendEndEffectorTraceSample();
             }
         }
@@ -1915,7 +1915,7 @@ namespace robot_qt_viewer
     void MotionPlanningModuleController::setSprayRangeVisible(bool visible)
     {
         m_sprayRangeVisible = visible;
-        if(RobotQtViewerViewportServices* viewportServices = m_context.viewportServices()) {
+        if(IRobotQtViewerMotionPlanningViewportPort* viewportServices = m_context.motionPlanningViewport()) {
             viewportServices->setSprayRangeVisible(m_selectedRobotId, visible);
         }
     }
@@ -1923,14 +1923,14 @@ namespace robot_qt_viewer
     void MotionPlanningModuleController::setEndEffectorTraceVisible(bool visible)
     {
         m_endEffectorTraceVisible = visible;
-        if(auto* services = m_context.viewportServices()) {
+        if(auto* services = m_context.motionPlanningViewport()) {
             services->setEndEffectorTraceVisible(m_selectedRobotId, visible);
         }
     }
 
     void MotionPlanningModuleController::clearEndEffectorTrace()
     {
-        if(auto* services = m_context.viewportServices()) {
+        if(auto* services = m_context.motionPlanningViewport()) {
             services->clearEndEffectorTrace();
         }
     }
@@ -1962,7 +1962,7 @@ namespace robot_qt_viewer
         if(!m_sprayMeasurementEnabled) {
             return;
         }
-        const auto* services = m_context.viewportServices();
+        const auto* services = m_context.motionPlanningViewport();
         m_currentSprayMeasurement = services
             ? services->sprayMeasurement(m_selectedRobotId) : SprayMeasurementResult{};
         const auto& result = m_currentSprayMeasurement;
@@ -2155,7 +2155,7 @@ namespace robot_qt_viewer
             emptyPoseText,
             emptyJointText);
 
-        if(RobotQtViewerViewportServices* viewportServices = m_context.viewportServices()) {
+        if(IRobotQtViewerMotionPlanningViewportPort* viewportServices = m_context.motionPlanningViewport()) {
             if(selectedPlan != nullptr && !selectedPlan->cartesianControlPoints.empty()) {
                 viewportServices->setTrajectoryControlPointOverlay(
                     QString::fromStdString(selectedPlan->id),
@@ -2257,7 +2257,7 @@ namespace robot_qt_viewer
             return false;
         }
 
-        RobotQtViewerViewportServices* viewportServices = m_context.viewportServices();
+        IRobotQtViewerMotionPlanningViewportPort* viewportServices = m_context.motionPlanningViewport();
         if(viewportServices == nullptr) {
             m_widget.setResult(QStringLiteral("Viewport is not available."), false);
             return false;
@@ -2354,9 +2354,9 @@ namespace robot_qt_viewer
         if(options.model.jointNames.size() != 6 || lowerDegrees.size() != 6 || upperDegrees.size() != 6) {
             m_widget.setResult(QStringLiteral("Multi IK requires six revolute joints and six search ranges."), false); return;
         }
-        auto* services = m_context.viewportServices();
+        auto* services = m_context.motionPlanningViewport();
         auto fk = services ? services->robotForwardKinematics(m_selectedRobotId, options.model.jointNames, useTool) :
-            RobotQtViewerViewportServices::RobotForwardKinematics{};
+            IRobotQtViewerMotionPlanningViewportPort::RobotForwardKinematics{};
         if(!fk) { m_widget.setResult(QStringLiteral("Actual robot/TCP FK is unavailable."), false); return; }
         const bool mapSigns = usesIrb4600RobotSystemJointSigns(m_context.document(), m_selectedRobotId);
         for(int j = 0; j < 6; ++j) {
