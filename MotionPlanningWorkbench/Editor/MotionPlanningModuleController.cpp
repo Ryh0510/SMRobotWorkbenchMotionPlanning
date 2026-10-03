@@ -694,6 +694,7 @@ namespace robot_qt_viewer
              event.sourceId != QStringLiteral("motionPlanningApplyJointPoint") &&
              event.sourceId != QStringLiteral("motionPlanningApplyCdfJointAngles") &&
              event.sourceId != QStringLiteral("motionPlanningPersistentCdfCollisionSetup"))) {
+            stopJointPlayback();
             invalidateMultiIk();
         }
         if(event.kind == RobotQtViewerEventKind::SelectionChanged) {
@@ -707,6 +708,7 @@ namespace robot_qt_viewer
             ensurePersistentCdfCollisionSetup();
             refreshTrajectoryView();
         } else if(event.kind == RobotQtViewerEventKind::ProjectDocumentChanged) {
+            stopJointPlayback();
             setSprayRangeVisible(m_sprayRangeVisible);
             clearEndEffectorTrace();
             setEndEffectorTraceVisible(m_endEffectorTraceVisible);
@@ -1688,25 +1690,22 @@ namespace robot_qt_viewer
             return;
         }
 
+        auto timeline = std::make_unique<motion_planning::JointPlaybackTimeline>();
+        if(!timeline->reset(selectedPlan->trajectory, durationSeconds, isCdfQpTrajectory(*selectedPlan))) {
+            m_widget.setResult(QStringLiteral("Playback requires finite, matching joint groups and a positive duration."), false);
+            return;
+        }
+        m_playbackTimeline = std::move(timeline);
         m_playbackCollisionSamples = 0;
         m_playbackCollisionHits = 0;
         m_playbackInvalidSamples = 0;
         m_playbackFinishedNaturally = false;
         m_playbackCollisionScene.reset();
 
-        const motion_planning::ProjectCdfQpRepairOptions cdfOptions;
-        if(!m_multiIkPlayback && cdfDetectorIsConfigured(m_context.document(), m_selectedRobotId.toStdString(), cdfOptions)) {
-            if(auto* viewportServices = m_context.collisionViewport()) {
-                viewportServices->refreshCollisionConfiguration(
-                    m_context.document(),
-                    projectBasePath(m_context.projectSession()));
-                viewportServices->setCollisionQueriesEnabled(true);
-                viewportServices->setCollisionDetectorEnabled(
-                    QString::fromStdString(cdfOptions.detectorId),
-                    true);
-                viewportServices->setActiveCollisionDetector(QString::fromStdString(cdfOptions.detectorId));
-            }
-        }
+        // Playback validates every sample in its independent planning snapshot below.
+        // Do not also enable expensive continuous viewport queries as a side effect.
+        // Explicit Collision workbench query settings remain owned by that workbench.
+        m_playbackPlan = std::make_shared<const motion_planning::StoredMotionPlan>(*selectedPlan);
 
         const std::vector<std::string> collisionDetectorIds =
             playbackCollisionDetectorIds(m_context.document(), m_selectedRobotId);
@@ -1744,17 +1743,17 @@ namespace robot_qt_viewer
         m_sprayPlaybackActive = true;
         m_widget.setSprayRecordingState(false, true, m_sprayExportPending);
         m_widget.setPlaybackActive(true);
-        const int intervalMs = pointCount <= 1
-            ? 1
-            : std::max(1, static_cast<int>(std::round(durationSeconds * 1000.0 / static_cast<double>(pointCount - 1))));
+        m_playbackTimeSeconds = 0.0;
+        m_playbackLastTickNs = 0;
+        m_playbackFrameTicket = 0;
+        m_playbackLastNotifyMs = -50;
+        m_playbackClock.start();
         if(m_playbackTimer != nullptr) {
-            m_playbackTimer->setInterval(intervalMs);
+            m_playbackTimer->setInterval(16);
         }
         advanceJointPlayback();
-        if(m_playbackTimer != nullptr &&
-            pointCount > 1 &&
-            m_playbackPointIndex > 0 &&
-            m_playbackPointIndex < pointCount) {
+        // Even a single-point trajectory must wait for its final frame to appear.
+        if(m_playbackTimer != nullptr && m_playbackPlan) {
             m_playbackTimer->start();
         }
     }
@@ -1785,80 +1784,98 @@ namespace robot_qt_viewer
         }
         m_widget.setSprayRecordingState(!m_spraySamples.empty(), false, m_sprayExportPending);
         m_multiIkPlayback.reset();
+        m_playbackPlan.reset();
+        m_playbackFrameTicket = 0;
     }
 
     void MotionPlanningModuleController::advanceJointPlayback()
     {
-        const std::vector<motion_planning::StoredMotionPlan> plans =
-            motion_planning::MotionPlanningProjectStore::plans(m_context.document());
-        const motion_planning::StoredMotionPlan* selectedPlan =
-            m_multiIkPlayback ? m_multiIkPlayback.get() :
-            findMotionPlan(plans, m_selectedRobotId, m_selectedTrajectoryId);
+        // Immutable per-run snapshot: never parse/copy the entire document per point.
+        const auto playbackPlan = m_playbackPlan;
+        const motion_planning::StoredMotionPlan* selectedPlan = playbackPlan.get();
         if(selectedPlan == nullptr || selectedPlan->trajectory.empty()) {
             stopJointPlayback();
             m_widget.setResult(QStringLiteral("Playback stopped because the selected trajectory is no longer available."), false);
             return;
         }
 
-        if(m_playbackPointIndex < 0 ||
-            m_playbackPointIndex >= static_cast<int>(selectedPlan->trajectory.points.size())) {
-            if(m_playbackTimer != nullptr) {
-                m_playbackTimer->stop();
-            }
-            m_widget.setPlaybackActive(false);
-            m_widget.setResult(QStringLiteral("Playback finished."), true);
+        const auto& trajectory = selectedPlan->trajectory;
+        const int pointCount = static_cast<int>(trajectory.points.size());
+        const qint64 nowNs = m_playbackClock.nsecsElapsed();
+        // A timer may fire multiple times before Qt actually composites the scene.
+        // Never overwrite a display pose that has not been presented yet. Discard
+        // time spent waiting instead of catching up after slow/hidden frames.
+        const double delta = m_playbackPointIndex == 0 ? 0.0 :
+            std::min(1.0 / 60.0, static_cast<double>(nowNs - m_playbackLastTickNs) * 1e-9);
+        m_playbackLastTickNs = nowNs;
+        auto* services = m_context.motionPlanningViewport();
+        if(services && m_playbackFrameTicket != 0 &&
+            !services->isFramePresented(m_playbackFrameTicket)) {
             return;
         }
-
-        const robottrajectory::TimedJointPoint& point =
-            selectedPlan->trajectory.points[static_cast<std::size_t>(m_playbackPointIndex)];
-        if(!applyJointValuesToRobotRuntime(
-               selectedPlan->jointNames,
-               point.q,
-               QStringLiteral("motionPlanningPlayback"))) {
-            stopJointPlayback();
-            return;
-        }
-
-        // Sample only after every joint in this playback point has been applied.
-        if(m_endEffectorTraceVisible) {
-            if(auto* services = m_context.motionPlanningViewport()) {
-                services->appendEndEffectorTraceSample();
-            }
-        }
-        if(m_sprayMeasurementEnabled) {
-            SprayMeasurementSample spraySample;
-            spraySample.pointIndex = m_playbackPointIndex;
-            spraySample.timeSeconds = point.time;
-            spraySample.jointValues = point.q;
-            spraySample.runtimeJointValues = maybeMapIrb4600JointSigns(
-                m_context.document(), m_selectedRobotId, point.q);
-            spraySample.measurement = m_currentSprayMeasurement;
-            m_spraySamples.push_back(std::move(spraySample));
-        }
-
-        ++m_playbackCollisionSamples;
-        if(m_playbackCollisionScene != nullptr) {
-            const std::vector<double> runtimeJointValues = maybeMapIrb4600JointSigns(
-                m_context.document(),
-                m_selectedRobotId,
-                point.q);
-            const motion_planning::StateValidationResult validation =
-                m_playbackCollisionScene->validateState(runtimeJointValues);
-            if(validation.valid) {
-                // Nothing to count.
-            } else if(validation.diagnosticCode == "state_in_collision") {
-                ++m_playbackCollisionHits;
-            } else {
-                ++m_playbackInvalidSamples;
-            }
-        }
-
-        ++m_playbackPointIndex;
-        if(m_playbackPointIndex >= static_cast<int>(selectedPlan->trajectory.points.size())) {
+        if(m_playbackPointIndex >= pointCount) {
             m_playbackFinishedNaturally = true;
             stopJointPlayback();
+            return;
         }
+        double displayTime = m_playbackTimeSeconds + delta;
+        QElapsedTimer workBudget;
+        workBudget.start();
+        while(m_playbackPointIndex < pointCount &&
+            m_playbackTimeline->pointTime(static_cast<std::size_t>(m_playbackPointIndex)) <= displayTime) {
+            const auto& point = trajectory.points[static_cast<std::size_t>(m_playbackPointIndex)];
+            // Preserve every source sample, but batch its GUI notifications/repaints.
+            if(!applyJointValuesToRobotRuntime(selectedPlan->jointNames, point.q,
+                QStringLiteral("motionPlanningPlayback"), false)) {
+                stopJointPlayback();
+                return;
+            }
+            if(m_endEffectorTraceVisible && services) { services->appendEndEffectorTraceSample(); }
+            if(m_sprayMeasurementEnabled) {
+                SprayMeasurementSample spraySample;
+                spraySample.pointIndex = m_playbackPointIndex;
+                spraySample.timeSeconds = point.time;
+                spraySample.jointValues = point.q;
+                spraySample.runtimeJointValues = maybeMapIrb4600JointSigns(m_context.document(), m_selectedRobotId, point.q);
+                spraySample.measurement = services ? services->sprayMeasurement(m_selectedRobotId) : SprayMeasurementResult{};
+                m_spraySamples.push_back(std::move(spraySample));
+            }
+            ++m_playbackCollisionSamples;
+            if(m_playbackCollisionScene) {
+                const auto runtimeJoints = maybeMapIrb4600JointSigns(m_context.document(), m_selectedRobotId, point.q);
+                const auto validation = m_playbackCollisionScene->validateState(runtimeJoints);
+                if(!validation.valid) {
+                    if(validation.diagnosticCode == "state_in_collision") { ++m_playbackCollisionHits; }
+                    else { ++m_playbackInvalidSamples; }
+                }
+            }
+            ++m_playbackPointIndex;
+            if(workBudget.elapsed() >= 8 && m_playbackPointIndex < pointCount &&
+                m_playbackTimeline->pointTime(static_cast<std::size_t>(m_playbackPointIndex)) <= displayTime) {
+                // Slow down under load rather than dropping validation/measurement rows
+                // or monopolizing the GUI thread to catch up with an overdue timer.
+                displayTime = m_playbackTimeline->pointTime(static_cast<std::size_t>(m_playbackPointIndex - 1));
+                break;
+            }
+        }
+        m_playbackTimeSeconds = displayTime;
+        const auto displayJoints = m_playbackTimeline->sample(trajectory, displayTime);
+        if(!applyJointValuesToRobotRuntime(selectedPlan->jointNames, displayJoints,
+            QStringLiteral("motionPlanningPlayback"), false)) {
+            stopJointPlayback();
+            return;
+        }
+        m_playbackFrameTicket = services ? services->requestFramePresentation() : 0;
+        const bool finished = m_playbackPointIndex >= pointCount;
+        const qint64 nowMs = m_playbackClock.elapsed();
+        if(finished || nowMs - m_playbackLastNotifyMs >= 50) {
+            m_playbackLastNotifyMs = nowMs;
+            m_context.documentController().publishRobotRuntimeChanged(QStringLiteral("motionPlanningPlayback"));
+            if(m_playbackPlan != playbackPlan) { return; }
+            if(m_sprayMeasurementEnabled) { updateSprayMeasurement(); }
+        }
+        // Completion/export is published on the next tick, after this final
+        // display pose has actually been presented by the viewport.
     }
 
     void MotionPlanningModuleController::setSelectedTrajectory(const QString& trajectoryId)
@@ -2246,7 +2263,7 @@ namespace robot_qt_viewer
     bool MotionPlanningModuleController::applyJointValuesToRobotRuntime(
         const std::vector<std::string>& jointNames,
         const std::vector<double>& jointValues,
-        const QString& sourceId)
+        const QString& sourceId, bool refreshViews)
     {
         if(m_selectedRobotId.isEmpty()) {
             m_widget.setResult(QStringLiteral("Select a robot before applying joint values."), false);
@@ -2268,15 +2285,13 @@ namespace robot_qt_viewer
             m_selectedRobotId)
             ? motion_planning::ProjectTrajectoryInverseKinematics::irb4600RobotSystemJointValues(jointValues)
             : jointValues;
-        for(std::size_t index = 0; index < jointNames.size(); ++index) {
-            viewportServices->setRobotJointValue(
-                m_selectedRobotId,
-                QString::fromStdString(jointNames[index]),
-                robotJointValues[index]);
+        if(!viewportServices->setRobotJointValues(m_selectedRobotId, jointNames, robotJointValues)) {
+            m_widget.setResult(QStringLiteral("Failed to apply the complete joint group to the robot runtime."), false);
+            return false;
         }
-        m_context.documentController().publishRobotRuntimeChanged(sourceId);
-        if(m_sprayMeasurementEnabled) {
-            updateSprayMeasurement();
+        if(refreshViews) {
+            m_context.documentController().publishRobotRuntimeChanged(sourceId);
+            if(m_sprayMeasurementEnabled) { updateSprayMeasurement(); }
         }
         return true;
     }

@@ -502,6 +502,7 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
     m_playbackDuration->setRange(0.1, 3600.0);
     m_playbackDuration->setValue(5.0);
     m_playbackDuration->setSuffix(QStringLiteral(" s"));
+    m_playbackDuration->setToolTip(QStringLiteral("Preview duration. CDF results use uniform joint-path speed; original trajectory times and exports are unchanged. Playback waits for each displayed frame. Slow rendering or sampling extends the preview; hiding the viewport pauses progress."));
     m_playbackButton = new QPushButton(QStringLiteral("Play IK result"), this);
     playbackLayout->addWidget(m_playbackDuration);
     playbackLayout->addWidget(m_playbackButton);

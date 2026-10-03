@@ -4,6 +4,7 @@
 #include "RobotQtViewerViewportPorts.h"
 
 #include <QObject>
+#include <QElapsedTimer>
 #include <QString>
 #include <QStringList>
 
@@ -19,6 +20,7 @@ class QThread;
 namespace motion_planning
 {
     struct StoredMotionPlan;
+    class JointPlaybackTimeline;
     struct CartesianMultiIkResult;
     struct LayeredIkGraphResult;
     class ProjectPlanningSceneSnapshot;
@@ -99,7 +101,7 @@ namespace robot_qt_viewer
         bool applyJointValuesToRobotRuntime(
             const std::vector<std::string>& jointNames,
             const std::vector<double>& jointValues,
-            const QString& sourceId);
+            const QString& sourceId, bool refreshViews = true);
         bool applyJointValuesToRobot(
             const std::vector<std::string>& jointNames,
             const std::vector<double>& jointValues,
@@ -129,6 +131,13 @@ namespace robot_qt_viewer
         std::unique_ptr<motion_planning::CartesianMultiIkResult> m_multiIkResult;
         std::vector<std::size_t> m_multiIkSelections;
         std::unique_ptr<motion_planning::StoredMotionPlan> m_multiIkPlayback;
+        std::shared_ptr<const motion_planning::StoredMotionPlan> m_playbackPlan;
+        std::unique_ptr<motion_planning::JointPlaybackTimeline> m_playbackTimeline;
+        QElapsedTimer m_playbackClock;
+        qint64 m_playbackLastTickNs = 0;
+        quint64 m_playbackFrameTicket = 0;
+        qint64 m_playbackLastNotifyMs = -50;
+        double m_playbackTimeSeconds = 0.0;
         QTimer* m_playbackTimer = nullptr;
         int m_playbackPointIndex = 0;
         int m_playbackCollisionSamples = 0;
