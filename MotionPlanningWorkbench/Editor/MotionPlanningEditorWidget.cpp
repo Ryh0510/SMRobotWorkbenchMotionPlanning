@@ -1,4 +1,5 @@
 #include "MotionPlanningEditorWidget.h"
+#include "CdfTrajectoryAnalysisDialog.h"
 #include "ConfigurationSelectionDialog.h"
 
 #include "RobotQtWidgetUtils.h"
@@ -690,7 +691,7 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
     cdfLayout->setSpacing(8);
     tabs->addTab(cdfPage, QStringLiteral("CDF"));
 
-    auto* cdfTitle = new QLabel(QStringLiteral("CDF Joint Angles"), cdfPage);
+    auto* cdfTitle = new QLabel(QStringLiteral("\u4f18\u5316\u521d\u59cb\u5173\u8282\u8f68\u8ff9\uff08\u4fdd\u7559\u8f93\u5165\uff09"), cdfPage);
     cdfTitle->setProperty("panelTitle", true);
     cdfLayout->addWidget(cdfTitle);
 
@@ -711,6 +712,17 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
 
     auto* cdfRepairForm = new QFormLayout();
     cdfRepairForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+
+    m_cdfTcpDeviation = makePoseSpinBox(cdfPage, 1.0, 1000.0, 100.0, 5.0, QStringLiteral(" mm"));
+    m_cdfTcpDeviation->setObjectName(QStringLiteral("cdfApfTcpDeviation"));
+    m_cdfTcpDeviation->setToolTip(QStringLiteral("\u4ee5\u539f\u59cb\u672b\u7aef\u63a7\u5236\u70b9\u6298\u7ebf\u4e3a\u53c2\u8003\uff0cAPF\u3001\u5e73\u6ed1\u4e0eQP\u5747\u5fc5\u987b\u9075\u5b88\uff1b\u8303\u56f4\u5185\u65e0\u6cd5\u7ed5\u5f00\u5219\u5931\u8d25\uff0c\u4e0d\u81ea\u52a8\u653e\u5bbd\u3002\u4ec5\u9650\u5236\u4f4d\u7f6e\uff0c\u4e0d\u9501\u5b9a\u59ff\u6001\u3002"));
+    cdfRepairForm->addRow(QStringLiteral("APF \u672b\u7aef\u6700\u5927\u504f\u79fb"), m_cdfTcpDeviation);
+
+    m_cdfEquivalentConfigurations = new QCheckBox(QStringLiteral("\u4fdd\u6301\u8d77\u7ec8 TCP \u4f4d\u59ff\uff0c\u5141\u8bb8\u7b49\u4ef7\u9006\u89e3\u6784\u578b"), cdfPage);
+    m_cdfEquivalentConfigurations->setObjectName(QStringLiteral("cdfEquivalentConfigurations"));
+    m_cdfEquivalentConfigurations->setChecked(true);
+    m_cdfEquivalentConfigurations->setToolTip(QStringLiteral("Top-K \u521d\u59cb\u89e3\u6709\u539f\u59cb Cartesian \u76ee\u6807\u65f6\uff0c\u5c1d\u8bd5\u8fde\u7eed\u9006\u89e3\u4ee5\u51cf\u5c11\u5206\u652f\u8df3\u53d8\u548c\u7ed5\u5708\u3002\u53d6\u6d88\u540e\u4fdd\u7559\u539f\u9009\u5173\u8282\u6784\u578b\u3002\u5355\u72ec\u5bfc\u5165\u5173\u8282 TXT \u4e0d\u542f\u7528\u6b64\u9879\u3002"));
+    cdfRepairForm->addRow(QString(), m_cdfEquivalentConfigurations);
 
     m_cdfSafetyMargin = makePoseSpinBox(cdfPage, 0.0, 1.0, 0.01, 0.001, QStringLiteral(" m"));
     cdfRepairForm->addRow(QStringLiteral("Safety margin"), m_cdfSafetyMargin);
@@ -747,6 +759,22 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
     m_cdfKeepEndpoints->setChecked(true);
     cdfRepairForm->addRow(QString(), m_cdfKeepEndpoints);
 
+    m_cdfSmoothWeight = makePoseSpinBox(cdfPage, 0.0, 100.0, 2.0, 0.5);
+    m_cdfSmoothWeight->setObjectName(QStringLiteral("cdfCurvatureWeight"));
+    m_cdfSmoothWeight->setToolTip(QStringLiteral("\u975e\u5747\u5300\u53c2\u8003\u5f27\u957f\u53c2\u6570\u7684\u4e8c\u9636\u5f2f\u66f2\u60e9\u7f5a\uff1b0 \u5173\u95ed QP \u66f2\u7387\u5e73\u6ed1\u3002"));
+    cdfRepairForm->addRow(QStringLiteral("\u66f2\u7387\u5e73\u6ed1\u6743\u91cd"), m_cdfSmoothWeight);
+    m_cdfSmoothingPasses = new QSpinBox(cdfPage);
+    m_cdfSmoothingPasses->setRange(0, 12); m_cdfSmoothingPasses->setValue(6);
+    m_cdfSmoothingPasses->setToolTip(QStringLiteral("0: off; 1-3: one multiscale cycle; 4-6: two; 7-12: three. Every cycle checks 128, 64, 32, 16, 8, 4 and 2-node windows against the ordered TCP corridor and collisions."));
+    cdfRepairForm->addRow(QStringLiteral("\u78b0\u649e\u7ea6\u675f\u5e73\u6ed1\u5f3a\u5ea6"), m_cdfSmoothingPasses);
+    m_cdfRetime = new QCheckBox(QStringLiteral("\u91cd\u65b0\u5b9a\u65f6\u5e76\u68c0\u67e5\u79bb\u6563\u901f\u5ea6 / \u52a0\u901f\u5ea6"), cdfPage);
+    m_cdfRetime->setChecked(true); cdfRepairForm->addRow(QString(), m_cdfRetime);
+    m_cdfFallbackVelocity = makePoseSpinBox(cdfPage, 0.1, 1000.0, 60.0, 5.0, QStringLiteral(" deg/s"));
+    m_cdfFallbackAcceleration = makePoseSpinBox(cdfPage, 0.1, 10000.0, 120.0, 10.0, QStringLiteral(" deg/s^2"));
+    m_cdfFallbackVelocity->setToolTip(QStringLiteral("\u4ec5\u7528\u4e8e\u673a\u5668\u4eba\u6a21\u578b\u672a\u63d0\u4f9b\u901f\u5ea6\u9650\u4f4d\u7684\u5173\u8282\u3002"));
+    m_cdfFallbackAcceleration->setToolTip(QStringLiteral("\u4ec5\u7528\u4e8e\u673a\u5668\u4eba\u6a21\u578b\u672a\u63d0\u4f9b\u52a0\u901f\u5ea6\u9650\u4f4d\u7684\u5173\u8282\uff1b\u8fd9\u4e0d\u662f\u5382\u5bb6\u8ba4\u8bc1\u53c2\u6570\u3002"));
+    cdfRepairForm->addRow(QStringLiteral("\u7f3a\u5931\u901f\u5ea6\u9650\u4f4d\u7684\u7f3a\u7701\u503c"), m_cdfFallbackVelocity);
+    cdfRepairForm->addRow(QStringLiteral("\u7f3a\u5931\u52a0\u901f\u5ea6\u9650\u4f4d\u7684\u7f3a\u7701\u503c"), m_cdfFallbackAcceleration);
     cdfLayout->addLayout(cdfRepairForm);
 
     m_repairCdfTrajectoryButton = new QPushButton(QStringLiteral("Repair imported trajectory with APF + CDF/QP"), cdfPage);
@@ -760,6 +788,44 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
     m_cdfResult = new QLabel(QStringLiteral("Import a CDF joint angle file."), cdfPage);
     m_cdfResult->setWordWrap(true);
     cdfLayout->addWidget(m_cdfResult);
+    auto* stagesTitle = new QLabel(QStringLiteral("\u9636\u6bb5\u7ed3\u679c\u68c0\u67e5\uff1a\u8f93\u5165 \u2192 APF \u2192 CDF/QP"), cdfPage);
+    stagesTitle->setProperty("panelTitle", true); cdfLayout->addWidget(stagesTitle);
+    m_cdfStageCombo = new QComboBox(cdfPage); m_cdfStageCombo->setObjectName(QStringLiteral("cdfStageSelection"));
+    cdfLayout->addWidget(m_cdfStageCombo);
+    m_cdfStageSummary = new QLabel(QStringLiteral("\u8fd0\u884c\u4f18\u5316\u540e\u53ef\u5206\u522b\u68c0\u67e5\u5404\u9636\u6bb5\u3002"), cdfPage);
+    m_cdfStageSummary->setWordWrap(true); cdfLayout->addWidget(m_cdfStageSummary);
+    m_cdfStageTable = new QTableWidget(cdfPage); m_cdfStageTable->setObjectName(QStringLiteral("cdfStageJointAngles"));
+    configureCdfTable(m_cdfStageTable, 6, 220); cdfLayout->addWidget(m_cdfStageTable);
+    auto* stageActions = new QHBoxLayout();
+    m_cdfStageApply = new QPushButton(QStringLiteral("\u5e94\u7528\u9636\u6bb5\u6240\u9009\u70b9"), cdfPage);
+    m_cdfStageApply->setObjectName(QStringLiteral("cdfStageApply"));
+    m_cdfStagePlay = new QPushButton(QStringLiteral("\u52a8\u6001\u64ad\u653e\u9636\u6bb5\u8f68\u8ff9"), cdfPage);
+    m_cdfStagePlay->setObjectName(QStringLiteral("cdfStagePlay"));
+    stageActions->addWidget(m_cdfStageApply); stageActions->addWidget(m_cdfStagePlay); cdfLayout->addLayout(stageActions);
+    auto* stageTiming = new QHBoxLayout();
+    m_cdfStageDuration = makePoseSpinBox(cdfPage, 0.1, 3600.0, 5.0, 1.0, QStringLiteral(" s"));
+    m_cdfStageActualTiming = new QCheckBox(QStringLiteral("\u6309\u8bb0\u5f55\u65f6\u95f4 1\u00d7 \u64ad\u653e"), cdfPage);
+    m_cdfStageActualTiming->setObjectName(QStringLiteral("cdfStageActualTiming"));
+    m_cdfStageActualTiming->setToolTip(QStringLiteral("\u52fe\u9009\u540e\u4f7f\u7528\u9636\u6bb5\u8bb0\u5f55\u65f6\u95f4\uff0c\u4e0d\u91c7\u7528\u9884\u89c8\u65f6\u957f\u3002\u7ed8\u5236\u8fc7\u8f7d\u4f1a\u653e\u6162\u663e\u793a\uff1b\u8d28\u91cf\u7a97\u53e3\u7684\u901f\u5ea6\u59cb\u7ec8\u7531\u8bb0\u5f55\u65f6\u95f4\u8ba1\u7b97\u3002"));
+    stageTiming->addWidget(new QLabel(QStringLiteral("\u9884\u89c8\u65f6\u957f"), cdfPage)); stageTiming->addWidget(m_cdfStageDuration);
+    stageTiming->addWidget(m_cdfStageActualTiming); cdfLayout->addLayout(stageTiming);
+    m_cdfStageExport = new QPushButton(QStringLiteral("\u5bfc\u51fa\u6240\u9009\u9636\u6bb5\u8f68\u8ff9..."), cdfPage);
+    m_cdfStageExport->setObjectName(QStringLiteral("cdfStageExport")); cdfLayout->addWidget(m_cdfStageExport);
+    m_cdfAnalysisButton = new QPushButton(QStringLiteral("\u67e5\u770b\u9636\u6bb5\u5bf9\u6bd4\u4e0e\u8d28\u91cf\u62a5\u544a"), cdfPage);
+    m_cdfAnalysisButton->setObjectName(QStringLiteral("cdfStageAnalysis")); cdfLayout->addWidget(m_cdfAnalysisButton);
+    connect(m_cdfStageCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) { emit cdfStageChanged(index); updateCdfActions(); });
+    connect(m_cdfStageTable, &QTableWidget::currentCellChanged, this, [this]() { updateCdfActions(); });
+    connect(m_cdfStageApply, &QPushButton::clicked, this, [this]() { emit applyCdfStagePointRequested(m_cdfStageCombo->currentIndex(), selectedOriginalPointIndex(m_cdfStageTable)); });
+    connect(m_cdfStagePlay, &QPushButton::clicked, this, [this]() {
+        if(m_playbackActive) emit playbackStopRequested();
+        else {
+            if(m_endEffectorTraceVisible) m_endEffectorTraceVisible->setChecked(true);
+            emit playCdfStageRequested(m_cdfStageCombo->currentIndex(), m_cdfStageDuration->value(), m_cdfStageActualTiming->isChecked());
+        }
+    });
+    connect(m_cdfStageExport, &QPushButton::clicked, this, [this]() { emit exportCdfStageRequested(m_cdfStageCombo->currentIndex()); });
+    connect(m_cdfAnalysisButton, &QPushButton::clicked, this, &MotionPlanningEditorWidget::cdfAnalysisRequested);
+    connect(m_cdfStageActualTiming, &QCheckBox::toggled, this, [this]() { updateCdfActions(); });
     cdfLayout->addStretch(1);
 
     connect(m_planButton, &QPushButton::clicked, this, [this]() {
@@ -889,6 +955,7 @@ void MotionPlanningEditorWidget::setPlaybackActive(bool active)
             : QStringLiteral("Play IK result"));
     }
     updateTrajectoryActions();
+    updateCdfActions();
 }
 
 void MotionPlanningEditorWidget::setSprayMeasurementText(const QString& text)
@@ -946,6 +1013,8 @@ void MotionPlanningEditorWidget::setRobotId(const QString& robotId)
 MotionPlanningEditorWidget::CdfQpRepairSettings MotionPlanningEditorWidget::cdfQpRepairSettings() const
 {
     CdfQpRepairSettings settings;
+    settings.allowEquivalentConfigurations = m_cdfEquivalentConfigurations->isChecked();
+    settings.apfMaxTcpDeviation = m_cdfTcpDeviation->value() / 1000.0;
     settings.safetyMargin = m_cdfSafetyMargin != nullptr ? m_cdfSafetyMargin->value() : settings.safetyMargin;
     settings.targetClearance = m_cdfTargetClearance != nullptr ? m_cdfTargetClearance->value() : settings.targetClearance;
     settings.finiteDifferenceStep = m_cdfFiniteDifferenceStep != nullptr
@@ -964,6 +1033,11 @@ MotionPlanningEditorWidget::CdfQpRepairSettings MotionPlanningEditorWidget::cdfQ
         : settings.segmentIntermediateSamples;
     settings.maxIterations = m_cdfMaxIterations != nullptr ? m_cdfMaxIterations->value() : settings.maxIterations;
     settings.keepEndpoints = m_cdfKeepEndpoints != nullptr ? m_cdfKeepEndpoints->isChecked() : settings.keepEndpoints;
+    settings.smoothWeight = m_cdfSmoothWeight->value();
+    settings.smoothingPasses = m_cdfSmoothingPasses->value();
+    settings.retimeOutput = m_cdfRetime->isChecked();
+    settings.fallbackVelocityDegrees = m_cdfFallbackVelocity->value();
+    settings.fallbackAccelerationDegrees = m_cdfFallbackAcceleration->value();
     return settings;
 }
 
@@ -1088,6 +1162,54 @@ void MotionPlanningEditorWidget::setCdfJointAngleView(
     updateCdfActions();
 }
 
+void MotionPlanningEditorWidget::setCdfAnalysisStages(const QStringList& names)
+{
+    if(m_cdfAnalysisDialog) { m_cdfAnalysisDialog->close(); m_cdfAnalysisDialog.clear(); }
+    const QSignalBlocker blocker(m_cdfStageCombo);
+    m_cdfStageCombo->clear(); m_cdfStageCombo->addItems(names);
+    m_cdfStageCombo->setCurrentIndex(names.size() - 1);
+    if(names.isEmpty()) {
+        m_cdfStageTable->clearContents(); m_cdfStageTable->setRowCount(0);
+        m_cdfStageSummary->setText(QStringLiteral("\u8fd0\u884c\u4f18\u5316\u540e\u53ef\u5206\u522b\u68c0\u67e5\u5404\u9636\u6bb5\u3002"));
+    }
+    updateCdfActions();
+}
+
+void MotionPlanningEditorWidget::setCdfStageView(const QVector<QString>& names,
+    const QVector<CdfJointAngleRow>& rows, const QString& summary)
+{
+    QStringList headers{QStringLiteral("#"), QStringLiteral("time_s")};
+    for(const auto& name : names) headers << name + QStringLiteral(" (deg)");
+    configureTrajectoryTable(m_cdfStageTable, headers, 220);
+    const QSignalBlocker blocker(m_cdfStageTable);
+    m_cdfStageTable->setUpdatesEnabled(false); m_cdfStageTable->clearContents(); m_cdfStageTable->clearSpans();
+    const auto sourceRows = sampledSourceRows(rows.size());
+    const bool preview = sourceRows.size() < rows.size();
+    m_cdfStageTable->setRowCount(sourceRows.size() + (preview ? 1 : 0));
+    for(int i = 0; i < sourceRows.size(); ++i) {
+        const auto index = sourceRows[i]; const auto& row = rows[index];
+        auto* item = makeReadOnlyItem(QString::number(row.index)); setOriginalPointIndex(item, index);
+        m_cdfStageTable->setItem(i, 0, item); m_cdfStageTable->setItem(i, 1, makeReadOnlyItem(row.timeText));
+        for(int j = 0; j < row.jointAngleTexts.size(); ++j) m_cdfStageTable->setItem(i, j + 2, makeReadOnlyItem(row.jointAngleTexts[j]));
+    }
+    if(preview) {
+        m_cdfStageTable->setSpan(sourceRows.size(), 0, 1, headers.size());
+        m_cdfStageTable->setItem(sourceRows.size(), 0, makeNoticeItem(QStringLiteral("\u663e\u793a %1 / %2 \u884c\uff1b\u5e94\u7528\u3001\u64ad\u653e\u548c\u5bfc\u51fa\u4ecd\u4f7f\u7528\u5168\u90e8\u539f\u59cb\u6570\u636e\u3002").arg(sourceRows.size()).arg(rows.size())));
+    }
+    if(!sourceRows.empty()) m_cdfStageTable->setCurrentCell(0, 0);
+    m_cdfStageTable->setUpdatesEnabled(true); m_cdfStageSummary->setText(summary); updateCdfActions();
+}
+
+void MotionPlanningEditorWidget::showCdfAnalysis(const QVector<CdfStageViewData>& stages,
+    const QStringList& names, const QString& diagnostics)
+{
+    if(m_cdfAnalysisDialog) { m_cdfAnalysisDialog->show(); m_cdfAnalysisDialog->raise(); return; }
+    auto* dialog = new CdfTrajectoryAnalysisDialog(stages, names, diagnostics, this);
+    m_cdfAnalysisDialog = dialog;
+    connect(dialog, &CdfTrajectoryAnalysisDialog::exportQualityRequested, this, &MotionPlanningEditorWidget::exportCdfQualityRequested);
+    m_cdfAnalysisDialog->show();
+}
+
 void MotionPlanningEditorWidget::setCdfExportAvailable(bool available)
 {
     m_cdfExportAvailable = available;
@@ -1169,7 +1291,7 @@ void MotionPlanningEditorWidget::updateCdfActions()
         m_importCdfButton->setEnabled(hasRobot);
     }
     if(m_applyCdfJointButton != nullptr) {
-        m_applyCdfJointButton->setEnabled(hasRobot && hasValidRow);
+        m_applyCdfJointButton->setEnabled(hasRobot && hasValidRow && !m_playbackActive);
     }
     if(m_cdfSafetyMargin != nullptr) {
         m_cdfSafetyMargin->setEnabled(hasRobot && hasImportedRows);
@@ -1199,11 +1321,24 @@ void MotionPlanningEditorWidget::updateCdfActions()
         m_cdfKeepEndpoints->setEnabled(hasRobot && hasImportedRows);
     }
     if(m_repairCdfTrajectoryButton != nullptr) {
-        m_repairCdfTrajectoryButton->setEnabled(hasRobot && hasImportedRows);
+        m_repairCdfTrajectoryButton->setEnabled(hasRobot && hasImportedRows && !m_playbackActive);
     }
     if(m_exportCdfTrajectoryButton != nullptr) {
         m_exportCdfTrajectoryButton->setEnabled(hasRobot && m_cdfExportAvailable);
     }
+    const bool hasStage = m_cdfStageCombo && m_cdfStageCombo->count() > 0;
+    if(m_cdfStageCombo) m_cdfStageCombo->setEnabled(hasStage && !m_playbackActive);
+    if(m_cdfStageApply) m_cdfStageApply->setEnabled(hasStage && hasRobot && !m_playbackActive && selectedOriginalPointIndex(m_cdfStageTable) >= 0);
+    if(m_cdfStagePlay) {
+        m_cdfStagePlay->setEnabled(hasStage && hasRobot);
+        m_cdfStagePlay->setText(m_playbackActive ? QStringLiteral("\u505c\u6b62\u64ad\u653e") : QStringLiteral("\u52a8\u6001\u64ad\u653e\u9636\u6bb5\u8f68\u8ff9"));
+    }
+    if(m_cdfStageExport) m_cdfStageExport->setEnabled(hasStage);
+    if(m_cdfAnalysisButton) m_cdfAnalysisButton->setEnabled(hasStage);
+    if(m_cdfStageDuration) m_cdfStageDuration->setEnabled(hasStage && !m_playbackActive && !m_cdfStageActualTiming->isChecked());
+    if(m_cdfStageActualTiming) m_cdfStageActualTiming->setEnabled(hasStage && !m_playbackActive);
+    for(QWidget* setting : QVector<QWidget*>{m_cdfSmoothWeight, m_cdfSmoothingPasses, m_cdfRetime, m_cdfFallbackVelocity, m_cdfFallbackAcceleration})
+        if(setting) setting->setEnabled(hasRobot && hasImportedRows && !m_playbackActive);
 }
 
 void MotionPlanningEditorWidget::showControlPointContextMenu(const QPoint& pos)

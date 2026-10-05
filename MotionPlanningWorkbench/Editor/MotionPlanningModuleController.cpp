@@ -3,6 +3,7 @@
 #include "ConfigurationSelectionDialog.h"
 
 #include "MotionPlanningEditorWidget.h"
+#include "CdfTrajectoryAnalysisDialog.h"
 #include "RobotQtViewerDocumentContext.h"
 #include "RobotQtViewerDocumentController.h"
 #include "RobotQtViewerSelectionModel.h"
@@ -511,6 +512,64 @@ namespace
     }
 }
 
+namespace
+{
+    QString qualityNumber(double value, double scale = 1.0)
+    {
+        return std::isfinite(value) ? QString::number(value * scale, 'g', 8) : QStringLiteral("\u4e0d\u53ef\u7528");
+    }
+
+    CdfStageViewData cdfStageViewData(const motion_planning::CdfTrajectoryStage& stage,
+        const simulation_project::ProjectDocument& document, const QString& robotId, int index)
+    {
+        CdfStageViewData view;
+        view.name = QStringList{QStringLiteral("\u8f93\u5165"), QStringLiteral("APF"), QStringLiteral("CDF/QP")}.value(index, QString::fromStdString(stage.name));
+        const auto& q = stage.quality;
+        if(index > 0 && (stage.invalidSegments != 0 || !stage.tcpCorridorValid))
+            view.name += QStringLiteral("\uff08\u672a\u901a\u8fc7\u9a8c\u6536\uff0c\u4ec5\u4f9b\u8bca\u65ad\uff09");
+        view.timingValid = q.timingValid;
+        view.metrics = QStringList{QString::number(stage.plan.trajectory.points.size()), qualityNumber(q.duration),
+            qualityNumber(q.jointLength), qualityNumber(q.bendingCost), qualityNumber(q.maximumCornerRadians, 180.0 / kPi),
+            qualityNumber(q.peakVelocity, 180.0 / kPi), qualityNumber(q.peakAcceleration, 180.0 / kPi),
+            QString::number(q.nonPositiveIntervals), QString::number(q.positionLimitViolations),
+            q.timingValid ? QString::number(q.velocityLimitViolations) : QStringLiteral("\u65e0\u6cd5\u68c0\u67e5"),
+            q.timingValid ? QString::number(q.accelerationLimitViolations) : QStringLiteral("\u65e0\u6cd5\u68c0\u67e5"),
+            QString::number(stage.invalidSegments), qualityNumber(stage.minimumPhi, 1000.0),
+            q.tcpAvailable ? qualityNumber(q.tcpLength, 1000.0) : QStringLiteral("\u4e0d\u53ef\u7528"),
+            q.tcpAvailable ? qualityNumber(q.peakTcpSpeed, 1000.0) : QStringLiteral("\u4e0d\u53ef\u7528"),
+            q.tcpAvailable ? qualityNumber(q.maximumTcpDeviation, 1000.0) : QStringLiteral("\u4e0d\u53ef\u7528"),
+            q.tcpAvailable ? qualityNumber(q.maximumOrientationDeviation, 180.0 / kPi) : QStringLiteral("\u4e0d\u53ef\u7528"),
+            QStringLiteral("%1 / %2").arg(q.fallbackVelocityLimits).arg(q.fallbackAccelerationLimits), qualityNumber(stage.elapsedSeconds)};
+        const auto degrees = [](const std::vector<double>& values) {
+            QVector<double> result; result.reserve(static_cast<int>(values.size()));
+            for(double value : values) result.push_back(value * 180.0 / kPi);
+            return result;
+        };
+        view.peakVelocities = degrees(q.jointPeakVelocities); view.peakAccelerations = degrees(q.jointPeakAccelerations);
+        view.velocityLimits = degrees(q.jointVelocityLimits); view.accelerationLimits = degrees(q.jointAccelerationLimits);
+        const auto& points = stage.plan.trajectory.points;
+        if(!points.empty()) view.segmentVelocities.resize(static_cast<int>(points.front().q.size()));
+        for(std::size_t i = 0; i < points.size(); ++i) {
+            view.times.push_back(points[i].time);
+            view.angles.push_back(degrees(maybeMapIrb4600JointSigns(document, robotId, points[i].q)));
+            view.accelerations.push_back(degrees(maybeMapIrb4600JointSigns(document, robotId, points[i].qdd)));
+            if(i + 1 < points.size()) {
+                const double dt = points[i + 1].time - points[i].time;
+                const auto a = maybeMapIrb4600JointSigns(document, robotId, points[i].q);
+                const auto b = maybeMapIrb4600JointSigns(document, robotId, points[i + 1].q);
+                for(int j = 0; j < view.segmentVelocities.size(); ++j) {
+                    const double velocity = dt > 0.0 ? (b[j] - a[j]) * 180.0 / kPi / dt : std::numeric_limits<double>::quiet_NaN();
+                    view.segmentVelocities[j].push_back({points[i].time, velocity});
+                    view.segmentVelocities[j].push_back({points[i + 1].time, velocity});
+                }
+            }
+        }
+        for(const auto& p : q.tcpPositions) view.tcpPositions.push_back({p.x() * 1000.0, p.y() * 1000.0, p.z() * 1000.0});
+        for(const auto& p : stage.referenceTcpPositions) view.referenceTcpPositions.push_back({p.x() * 1000.0, p.y() * 1000.0, p.z() * 1000.0});
+        return view;
+    }
+}
+
 namespace robot_qt_viewer
 {
     MotionPlanningModuleController::MotionPlanningModuleController(
@@ -589,6 +648,12 @@ namespace robot_qt_viewer
             });
         connect(&m_widget, &MotionPlanningEditorWidget::exportCdfTrajectoryRequested,
             this, &MotionPlanningModuleController::exportCdfTrajectory);
+        connect(&m_widget, &MotionPlanningEditorWidget::cdfStageChanged, this, &MotionPlanningModuleController::showCdfStage);
+        connect(&m_widget, &MotionPlanningEditorWidget::applyCdfStagePointRequested, this, &MotionPlanningModuleController::applyCdfStagePoint);
+        connect(&m_widget, &MotionPlanningEditorWidget::playCdfStageRequested, this, &MotionPlanningModuleController::playCdfStage);
+        connect(&m_widget, &MotionPlanningEditorWidget::exportCdfStageRequested, this, &MotionPlanningModuleController::exportCdfStage);
+        connect(&m_widget, &MotionPlanningEditorWidget::cdfAnalysisRequested, this, &MotionPlanningModuleController::showCdfAnalysis);
+        connect(&m_widget, &MotionPlanningEditorWidget::exportCdfQualityRequested, this, &MotionPlanningModuleController::exportCdfQuality);
         connect(&m_widget, &MotionPlanningEditorWidget::insertControlPointBeforeRequested,
             this, &MotionPlanningModuleController::insertControlPointBefore);
         connect(&m_widget, &MotionPlanningEditorWidget::insertControlPointAfterRequested,
@@ -684,6 +749,16 @@ namespace robot_qt_viewer
                 preview.previewRobotMountTransform || preview.upsertPreviewRobotMount ||
                 preview.removePreviewRobotMount || preview.upsertPreviewObjectFrame ||
                 preview.previewObjectFrameTransform || preview.previewSceneObjectTransform;
+        }
+        if(event.kind == RobotQtViewerEventKind::ProjectOpened || event.kind == RobotQtViewerEventKind::CollisionChanged ||
+            event.kind == RobotQtViewerEventKind::ToolSetupChanged || event.kind == RobotQtViewerEventKind::AttachmentChanged ||
+            kinematicPreviewChanged || (event.kind == RobotQtViewerEventKind::ProjectDocumentChanged &&
+                event.sourceId != QStringLiteral("motionPlanningCdfQpRepair") &&
+                event.sourceId != QStringLiteral("motionPlanningMultiIkApply") &&
+                event.sourceId != QStringLiteral("motionPlanningApplyJointPoint") &&
+                event.sourceId != QStringLiteral("motionPlanningApplyCdfJointAngles") &&
+                event.sourceId != QStringLiteral("motionPlanningPersistentCdfCollisionSetup"))) {
+            clearCdfAnalysis();
         }
         if(event.kind == RobotQtViewerEventKind::ProjectOpened ||
             event.kind == RobotQtViewerEventKind::ToolSetupChanged ||
@@ -893,6 +968,7 @@ namespace robot_qt_viewer
         }
 
         m_graphCdfRobotId.clear();
+        clearCdfAnalysis();
         m_cdfSourceName = QString::fromStdString(importResult.sourceName);
         m_cdfJointNames = importResult.jointNames;
         m_cdfJointPoints.clear();
@@ -1170,12 +1246,18 @@ namespace robot_qt_viewer
                 degreesToRadians(importedPoint.jointAnglesDegrees));
             seedTrajectory.points.push_back(std::move(point));
         }
-        std::stable_sort(seedTrajectory.points.begin(), seedTrajectory.points.end(),
-            [](const auto& a, const auto& b) { return a.time < b.time; });
+        clearCdfAnalysis();
 
         const MotionPlanningEditorWidget::CdfQpRepairSettings settings =
             m_widget.cdfQpRepairSettings();
         motion_planning::ProjectCdfQpRepairOptions options;
+        options.apfMaxTcpDeviation = settings.apfMaxTcpDeviation;
+        if(!m_graphCdfRobotId.isEmpty() && m_multiIkResult &&
+            m_multiIkResult->source.cartesianControlPoints.points.size()==seedTrajectory.points.size()) {
+            for(const auto& point:m_multiIkResult->source.cartesianControlPoints.points)
+                options.cartesianTargets.push_back(point.tcpPose);
+            options.allowEquivalentEndpointConfigurations = settings.allowEquivalentConfigurations;
+        }
         options.safetyMargin = settings.safetyMargin;
         options.targetClearance = settings.targetClearance;
         options.finiteDifferenceStep = settings.finiteDifferenceStep;
@@ -1186,6 +1268,13 @@ namespace robot_qt_viewer
         options.segmentIntermediateSamples = settings.segmentIntermediateSamples;
         options.maxIterations = settings.maxIterations;
         options.keepEndpoints = settings.keepEndpoints;
+        options.smoothWeight = settings.smoothWeight;
+        options.postSmoothingIterations = settings.smoothingPasses;
+        options.retimeOutput = settings.retimeOutput;
+        options.fallbackMaxVelocity = settings.fallbackVelocityDegrees * kPi / 180.0;
+        options.fallbackMaxAcceleration = settings.fallbackAccelerationDegrees * kPi / 180.0;
+        if(auto* services = m_context.motionPlanningViewport())
+            options.worldForwardKinematics = services->robotForwardKinematics(m_selectedRobotId, robotJointNames, true);
 
         const std::string robotId = m_selectedRobotId.toStdString();
         if(!cdfDetectorIsConfigured(m_context.document(), robotId, options)) {
@@ -1274,7 +1363,7 @@ namespace robot_qt_viewer
                     updateElapsed();
                 }, Qt::QueuedConnection);
             };
-            report(QStringLiteral("CDF performance v2 | %1 | %2").arg(buildMode, executable));
+            report(QStringLiteral("CDF performance v3 (curvature/stages/timing) | %1 | %2").arg(buildMode, executable));
             report(QStringLiteral("Source: %1 | robot: %2 | input points: %3 | base: %4")
                 .arg(sourceName, QString::fromStdString(robotId))
                 .arg(static_cast<qulonglong>(seedTrajectory.points.size()))
@@ -1286,6 +1375,11 @@ namespace robot_qt_viewer
                 .arg(options.keepEndpoints).arg(options.postSmoothingIterations)
                 .arg(options.optimizationMaxJointStep).arg(std::min(options.validationMaxJointStep, 0.001)));
             if(!logOpened) report(QStringLiteral("Cannot write log: %1").arg(log.errorString()));
+            report(QStringLiteral("Curvature weight=%1, refinement passes=%2, retime=%3, fallback velocity=%4 rad/s, fallback acceleration=%5 rad/s^2")
+                .arg(options.smoothWeight).arg(options.postSmoothingIterations).arg(options.retimeOutput)
+                .arg(options.fallbackMaxVelocity).arg(options.fallbackMaxAcceleration));
+            report(QStringLiteral("APF TCP maximum deviation=%1 mm; reference=original control-point TCP polyline; strict ordered correspondence")
+                .arg(options.apfMaxTcpDeviation * 1000.0));
             options.progress = [&](const std::string& message) { report(QString::fromStdString(message)); };
             try {
                 repairResult = motion_planning::ProjectCdfQpTrajectoryRepairService().repair(
@@ -1318,6 +1412,14 @@ namespace robot_qt_viewer
             return;
         }
 
+        m_cdfAnalysis = std::make_unique<motion_planning::ProjectCdfQpRepairResult>(repairResult);
+        QStringList stageNames{QStringLiteral("\u8f93\u5165\uff08\u52a0\u5bc6\u53c2\u8003\uff09"), QStringLiteral("APF \u907f\u969c\u7ed3\u679c\uff08QP \u524d\uff09"), QStringLiteral("CDF/QP \u6700\u7ec8\u7ed3\u679c")};
+        while(stageNames.size() > static_cast<int>(repairResult.stages.size())) stageNames.removeLast();
+        for(int i=1;i<stageNames.size();++i)
+            if(repairResult.stages[i].invalidSegments != 0 || !repairResult.stages[i].tcpCorridorValid)
+                stageNames[i] += QStringLiteral("\uff08\u672a\u901a\u8fc7\u9a8c\u6536\uff0c\u4ec5\u4f9b\u8bca\u65ad\uff09");
+        m_widget.setCdfAnalysisStages(stageNames);
+        showCdfStage(stageNames.size() - 1);
         if(repairResult.plan.trajectory.empty()) {
             const QString message = repairResult.diagnostics.empty()
                 ? QStringLiteral("APF + CDF/QP repair failed before producing a trajectory.")
@@ -1335,6 +1437,8 @@ namespace robot_qt_viewer
         }
         for(robottrajectory::TimedJointPoint& point : storedPlan.trajectory.points) {
             point.q = maybeMapIrb4600JointSigns(m_context.document(), m_selectedRobotId, point.q);
+            if(!point.qd.empty()) point.qd = maybeMapIrb4600JointSigns(m_context.document(), m_selectedRobotId, point.qd);
+            if(!point.qdd.empty()) point.qdd = maybeMapIrb4600JointSigns(m_context.document(), m_selectedRobotId, point.qdd);
         }
 
         if(!commitMotionPlanUpdate(storedPlan, QStringLiteral("motionPlanningCdfQpRepair"))) {
@@ -1342,19 +1446,10 @@ namespace robot_qt_viewer
             return;
         }
 
-        m_cdfSourceName = QStringLiteral("%1 repaired by APF + CDF/QP").arg(m_cdfSourceName.isEmpty()
-            ? QStringLiteral("Imported trajectory")
-            : m_cdfSourceName);
-        m_cdfJointNames = robotJointNames;
-        m_cdfJointPoints.clear();
-        m_cdfJointPoints.reserve(storedPlan.trajectory.points.size());
-        for(const robottrajectory::TimedJointPoint& point : storedPlan.trajectory.points) {
-            ImportedCdfJointPoint importedPoint;
-            importedPoint.timeSeconds = point.time;
-            importedPoint.jointAnglesDegrees = radiansToDegrees(point.q);
-            m_cdfJointPoints.push_back(std::move(importedPoint));
-        }
-        refreshCdfJointAngleView();
+        // The input remains available for repeatable runs and before/after checks.
+        m_cdfAnalysis = std::make_unique<motion_planning::ProjectCdfQpRepairResult>(repairResult);
+        m_widget.setCdfAnalysisStages(stageNames);
+        showCdfStage(stageNames.size() - 1);
         refreshTrajectoryView();
 
         const QString planId = QString::fromStdString(storedPlan.id);
@@ -1367,6 +1462,138 @@ namespace robot_qt_viewer
         m_widget.setCdfResult(summary, repairResult.success);
         emit trajectoryPlanned(planId);
         emit statusMessageRequested(summary, repairResult.success ? 6000 : 9000);
+    }
+
+    void MotionPlanningModuleController::clearCdfAnalysis()
+    {
+        if(m_cdfStagePlayback) stopJointPlayback();
+        m_cdfAnalysis.reset();
+        m_widget.setCdfAnalysisStages({});
+    }
+
+    void MotionPlanningModuleController::showCdfStage(int index)
+    {
+        if(!m_cdfAnalysis || index < 0 || index >= static_cast<int>(m_cdfAnalysis->stages.size())) return;
+        const auto& stage = m_cdfAnalysis->stages[index];
+        QVector<QString> names;
+        for(const auto& name : stage.plan.jointNames) names.push_back(QString::fromStdString(name));
+        QVector<MotionPlanningEditorWidget::CdfJointAngleRow> rows;
+        rows.reserve(static_cast<int>(stage.plan.trajectory.points.size()));
+        for(std::size_t i = 0; i < stage.plan.trajectory.points.size(); ++i) {
+            const auto& point = stage.plan.trajectory.points[i];
+            MotionPlanningEditorWidget::CdfJointAngleRow row;
+            row.index = static_cast<int>(i + 1); row.timeText = QString::number(point.time, 'f', 6);
+            for(double angle : maybeMapIrb4600JointSigns(m_context.document(), m_selectedRobotId, point.q))
+                row.jointAngleTexts.push_back(QString::number(angle * 180.0 / kPi, 'f', 6));
+            rows.push_back(std::move(row));
+        }
+        const auto& quality = stage.quality;
+        const QString validationNote = stage.invalidSegments != 0 || !stage.tcpCorridorValid
+            ? QStringLiteral("\u672a\u901a\u8fc7\u78b0\u649e\u6216\u672b\u7aef\u8d70\u5eca\u9a8c\u6536\uff1a\u5f53\u524d\u9636\u6bb5\u4ec5\u4f9b\u8bca\u65ad\uff0c\u4e0d\u53ef\u4f5c\u4e3a\u6267\u884c\u8f68\u8ff9\u3002\n")
+            : QStringLiteral("\u5df2\u901a\u8fc7\u78b0\u649e\u548c\u6240\u8bbe\u672b\u7aef\u8d70\u5eca\u9a8c\u6536\u3002\n");
+        m_widget.setCdfStageView(names, rows,
+            validationNote + QStringLiteral("%1 \u70b9 | \u6267\u884c\u8bb0\u5f55 %2 s | \u957f\u5ea6 %3 rad | \u5f2f\u66f2\u4ee3\u4ef7 %4 | \u78b0\u649e\u4e0d\u901a\u8fc7 %5 \u6bb5\n\u6700\u5c0f\u8282\u70b9 Phi %6 mm | \u65f6\u95f4 %7 | TCP \u6700\u5927\u504f\u79fb %8 mm\n\u901f\u5ea6\u548c\u6700\u4f18\u6027\u8bf7\u67e5\u770b\u8d28\u91cf\u62a5\u544a\uff1b\u521d\u59cb\u680f\u4fdd\u7559\u539f\u8f93\u5165\u3002")
+                .arg(rows.size()).arg(qualityNumber(quality.duration)).arg(qualityNumber(quality.jointLength))
+                .arg(qualityNumber(quality.bendingCost)).arg(stage.invalidSegments).arg(qualityNumber(stage.minimumPhi, 1000.0))
+                .arg(quality.timingValid ? QStringLiteral("\u5408\u6cd5") : QStringLiteral("\u975e\u9012\u589e\uff0c\u901f\u5ea6\u4e0d\u53ef\u5b8c\u6574\u8bc4\u4f30"))
+                .arg(quality.tcpAvailable ? qualityNumber(quality.maximumTcpDeviation, 1000.0) : QStringLiteral("\u4e0d\u53ef\u7528")));
+    }
+
+    void MotionPlanningModuleController::applyCdfStagePoint(int index, int point)
+    {
+        if(!m_cdfAnalysis || index < 0 || index >= static_cast<int>(m_cdfAnalysis->stages.size()) || point < 0) return;
+        const auto& stage = m_cdfAnalysis->stages[index];
+        if(point >= static_cast<int>(stage.plan.trajectory.points.size())) return;
+        const auto stored = maybeMapIrb4600JointSigns(m_context.document(), m_selectedRobotId, stage.plan.trajectory.points[point].q);
+        applyJointValuesToRobotRuntime(stage.plan.jointNames, stored, QStringLiteral("motionPlanningCdfStageApply"));
+    }
+
+    void MotionPlanningModuleController::playCdfStage(int index, double duration, bool actualTiming)
+    {
+        if(!m_cdfAnalysis || index < 0 || index >= static_cast<int>(m_cdfAnalysis->stages.size())) return;
+        const auto& stage = m_cdfAnalysis->stages[index];
+        if(actualTiming && !stage.quality.timingValid) {
+            m_widget.setCdfResult(QStringLiteral("\u8be5\u9636\u6bb5\u65f6\u95f4\u6233\u975e\u9012\u589e\uff0c\u4e0d\u80fd\u6309\u8bb0\u5f55\u65f6\u95f4\u64ad\u653e\uff1b\u53ef\u5173\u95ed 1\u00d7 \u4f7f\u7528\u9884\u89c8\uff0c\u6216\u67e5\u770b\u6700\u7ec8\u91cd\u65b0\u5b9a\u65f6\u7ed3\u679c\u3002"), false);
+            return;
+        }
+        stopJointPlayback();
+        m_cdfStagePlayback = std::make_unique<motion_planning::StoredMotionPlan>(stage.plan);
+        for(auto& point : m_cdfStagePlayback->trajectory.points) {
+            point.q = maybeMapIrb4600JointSigns(m_context.document(), m_selectedRobotId, point.q);
+            if(!point.qd.empty()) point.qd = maybeMapIrb4600JointSigns(m_context.document(), m_selectedRobotId, point.qd);
+            if(!point.qdd.empty()) point.qdd = maybeMapIrb4600JointSigns(m_context.document(), m_selectedRobotId, point.qdd);
+        }
+        m_cdfStageActualTiming = actualTiming;
+        if(actualTiming) duration = std::max(0.001, stage.quality.duration);
+        startJointPlayback(duration);
+    }
+
+    void MotionPlanningModuleController::showCdfAnalysis()
+    {
+        if(!m_cdfAnalysis) return;
+        QVector<CdfStageViewData> views;
+        for(std::size_t i = 0; i < m_cdfAnalysis->stages.size(); ++i)
+            views.push_back(cdfStageViewData(m_cdfAnalysis->stages[i], m_context.document(), m_selectedRobotId, static_cast<int>(i)));
+        QStringList names;
+        if(!m_cdfAnalysis->stages.empty()) for(const auto& name : m_cdfAnalysis->stages.front().plan.jointNames) names << QString::fromStdString(name);
+        QString diagnostics = QStringLiteral("QP \u5916\u5c42\u8f6e\u6570 %1\uff1b\u63a5\u53d7\u7684\u6b65\u6570 %2\uff1bOSQP \u8fed\u4ee3\u6570 %3\n\u78b0\u649e\u9a8c\u8bc1\u89d2\u5ea6\u6b65\u957f\u4e0d\u5927\u4e8e 0.001 rad\uff1b\u62a5\u544a Phi \u4e3a\u8282\u70b9\u95f4\u8ddd\u51cf\u53bb\u5b89\u5168\u88d5\u91cf\u3002\n\u8f93\u5165\u6765\u6e90\uff1a%4\n")
+            .arg(m_cdfAnalysis->statistics.iterations).arg(m_cdfAnalysis->statistics.acceptedQpSteps)
+            .arg(m_cdfAnalysis->statistics.qpIterations).arg(m_cdfSourceName);
+        for(const auto& diagnostic : m_cdfAnalysis->diagnostics) diagnostics += QString::fromStdString(diagnostic.code + ": " + diagnostic.message) + '\n';
+        m_widget.showCdfAnalysis(views, names, diagnostics);
+    }
+
+    void MotionPlanningModuleController::exportCdfQuality()
+    {
+        if(!m_cdfAnalysis) return;
+        QVector<CdfStageViewData> views;
+        for(std::size_t i = 0; i < m_cdfAnalysis->stages.size(); ++i)
+            views.push_back(cdfStageViewData(m_cdfAnalysis->stages[i], m_context.document(), m_selectedRobotId, static_cast<int>(i)));
+        const auto labels = cdfQualityMetricLabels();
+        const QString path = getSaveFileName(QStringLiteral("motionPlanning.cdfQuality.save"), &m_widget,
+            QStringLiteral("CDF quality CSV"), QStringLiteral("cdf_quality.csv"), QStringLiteral("CSV Files (*.csv);;All Files (*)"));
+        if(path.isEmpty()) return;
+        QSaveFile file(path);
+        if(!file.open(QIODevice::WriteOnly | QIODevice::Text)) { m_widget.setCdfResult(file.errorString(), false); return; }
+        QTextStream out(&file); out.setCodec("UTF-8"); out.setGenerateByteOrderMark(true);
+        const auto csv = [](QString text) { text.replace('"', QStringLiteral("\"\"")); return '"' + text + '"'; };
+        out << "metric";
+        for(const auto& view : views) out << ',' << csv(view.name);
+        out << '\n';
+        for(int i = 0; i < labels.size(); ++i) {
+            out << csv(labels[i]); for(const auto& view : views) out << ',' << csv(view.metrics.value(i)); out << '\n';
+        }
+        out << "\n# velocity and acceleration are sampled estimates, not continuous dynamics certification\n";
+        out.flush(); const bool success = out.status() == QTextStream::Ok && file.commit();
+        m_widget.setCdfResult(success ? QStringLiteral("Quality CSV: %1").arg(path) : file.errorString(), success);
+    }
+
+    void MotionPlanningModuleController::exportCdfStage(int index)
+    {
+        if(!m_cdfAnalysis || index < 0 || index >= static_cast<int>(m_cdfAnalysis->stages.size())) return;
+        // Snapshot before opening a modal file dialog, which can deliver document events.
+        const auto stage = m_cdfAnalysis->stages[index];
+        const auto document = m_context.document(); const auto robotId = m_selectedRobotId;
+        QString path = getSaveFileName(QStringLiteral("motionPlanning.cdfStage.save"), &m_widget,
+            QStringLiteral("\u5bfc\u51fa\u9636\u6bb5\u5173\u8282\u8f68\u8ff9"), QStringLiteral("%1_cdf_stage_%2.txt").arg(robotId).arg(index), QStringLiteral("Text Files (*.txt);;All Files (*)"));
+        if(path.isEmpty()) return;
+        if(!path.endsWith(QStringLiteral(".txt"), Qt::CaseInsensitive)) path += QStringLiteral(".txt");
+        QSaveFile file(path);
+        if(!file.open(QIODevice::WriteOnly | QIODevice::Text)) { m_widget.setCdfResult(file.errorString(), false); return; }
+        QTextStream out(&file); out.setLocale(QLocale::c()); out.setRealNumberNotation(QTextStream::FixedNotation); out.setRealNumberPrecision(6);
+        out << "# Stage: " << QString::fromStdString(stage.name) << "\n# Time unit: seconds\n# Joint angle unit: degrees\n";
+        out << "# Invalid collision segments: " << stage.invalidSegments << "; timing valid: " << stage.quality.timingValid << '\n';
+        out << "time_s";
+        for(std::size_t j = 0; j < stage.plan.jointNames.size(); ++j) out << '\t' << "J" << static_cast<qulonglong>(j + 1) << "_deg";
+        out << '\n';
+        for(const auto& point : stage.plan.trajectory.points) {
+            out << point.time;
+            for(double q : maybeMapIrb4600JointSigns(document, robotId, point.q)) out << '\t' << q * 180.0 / kPi;
+            out << '\n';
+        }
+        out.flush();
+        const bool success = out.status() == QTextStream::Ok && file.commit();
+        m_widget.setCdfResult(success ? QStringLiteral("\u9636\u6bb5\u8f68\u8ff9\u5df2\u5bfc\u51fa\uff1a%1").arg(path) : file.errorString(), success);
     }
 
     void MotionPlanningModuleController::exportCdfTrajectory()
@@ -1666,7 +1893,7 @@ namespace robot_qt_viewer
 
     void MotionPlanningModuleController::startJointPlayback(double durationSeconds)
     {
-        if(m_selectedRobotId.isEmpty() || m_selectedTrajectoryId.isEmpty()) {
+        if(m_selectedRobotId.isEmpty() || (m_selectedTrajectoryId.isEmpty() && !m_cdfStagePlayback)) {
             m_widget.setResult(QStringLiteral("Select a solved joint trajectory before playback."), false);
             return;
         }
@@ -1677,6 +1904,7 @@ namespace robot_qt_viewer
         const std::vector<motion_planning::StoredMotionPlan> plans =
             motion_planning::MotionPlanningProjectStore::plans(m_context.document());
         const motion_planning::StoredMotionPlan* selectedPlan =
+            m_cdfStagePlayback ? m_cdfStagePlayback.get() :
             m_multiIkPlayback ? m_multiIkPlayback.get() :
             findMotionPlan(plans, m_selectedRobotId, m_selectedTrajectoryId);
         if(selectedPlan == nullptr || selectedPlan->trajectory.empty()) {
@@ -1691,7 +1919,7 @@ namespace robot_qt_viewer
         }
 
         auto timeline = std::make_unique<motion_planning::JointPlaybackTimeline>();
-        if(!timeline->reset(selectedPlan->trajectory, durationSeconds, isCdfQpTrajectory(*selectedPlan))) {
+        if(!timeline->reset(selectedPlan->trajectory, durationSeconds, m_cdfStagePlayback ? !m_cdfStageActualTiming : isCdfQpTrajectory(*selectedPlan))) {
             m_widget.setResult(QStringLiteral("Playback requires finite, matching joint groups and a positive duration."), false);
             return;
         }
@@ -1739,7 +1967,7 @@ namespace robot_qt_viewer
         m_spraySamples.reserve(selectedPlan->trajectory.points.size());
         m_sprayJointNames = selectedPlan->jointNames;
         m_sprayRobotId = m_selectedRobotId;
-        m_sprayTrajectoryId = m_selectedTrajectoryId;
+        m_sprayTrajectoryId = QString::fromStdString(selectedPlan->id);
         m_sprayPlaybackActive = true;
         m_widget.setSprayRecordingState(false, true, m_sprayExportPending);
         m_widget.setPlaybackActive(true);
@@ -1784,6 +2012,7 @@ namespace robot_qt_viewer
         }
         m_widget.setSprayRecordingState(!m_spraySamples.empty(), false, m_sprayExportPending);
         m_multiIkPlayback.reset();
+        m_cdfStagePlayback.reset();
         m_playbackPlan.reset();
         m_playbackFrameTicket = 0;
     }
@@ -1894,6 +2123,7 @@ namespace robot_qt_viewer
     void MotionPlanningModuleController::setSelectedRobot(const QString& robotId)
     {
         if(m_selectedRobotId != robotId) {
+            clearCdfAnalysis();
             clearGraphCdfSeed();
             invalidateMultiIk();
             stopJointPlayback();
@@ -2691,6 +2921,7 @@ namespace robot_qt_viewer
         stopJointPlayback();
         m_graphCdfRobotId = m_selectedRobotId;
         const QString label = byStart ? m_graphStartLabels.value(row) : QStringLiteral("\u5168\u5c40 Top-M #%1").arg(row + 1);
+        clearCdfAnalysis();
         m_cdfSourceName = QStringLiteral("%1 | %2 | cost=%3")
             .arg(QString::fromStdString(selected.name.empty() ? selected.id : selected.name)).arg(label)
             .arg(result->paths[row].cost, 0, 'g', 12);

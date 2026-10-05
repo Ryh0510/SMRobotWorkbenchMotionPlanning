@@ -20,6 +20,7 @@ class QThread;
 namespace motion_planning
 {
     struct StoredMotionPlan;
+    struct ProjectCdfQpRepairResult;
     class JointPlaybackTimeline;
     struct CartesianMultiIkResult;
     struct LayeredIkGraphResult;
@@ -74,6 +75,13 @@ namespace robot_qt_viewer
         void applySelectedCdfJointAngles(int pointIndex);
         void repairImportedCdfTrajectory();
         void exportCdfTrajectory();
+        void clearCdfAnalysis();
+        void showCdfStage(int stage);
+        void applyCdfStagePoint(int stage, int point);
+        void playCdfStage(int stage, double previewDuration, bool actualTiming);
+        void exportCdfStage(int stage);
+        void exportCdfQuality();
+        void showCdfAnalysis();
         void exportJointTrajectory(bool cdfOnly);
         void insertControlPointBefore(int pointIndex);
         void insertControlPointAfter(int pointIndex);
@@ -120,6 +128,9 @@ namespace robot_qt_viewer
         QString m_cdfSourceName;
         std::vector<std::string> m_cdfJointNames;
         std::vector<ImportedCdfJointPoint> m_cdfJointPoints;
+        std::unique_ptr<motion_planning::ProjectCdfQpRepairResult> m_cdfAnalysis;
+        std::unique_ptr<motion_planning::StoredMotionPlan> m_cdfStagePlayback;
+        bool m_cdfStageActualTiming = false;
         QThread* m_graphThread = nullptr;
         std::shared_ptr<std::atomic_bool> m_graphCancel;
         std::unique_ptr<motion_planning::LayeredIkGraphResult> m_graphResult;

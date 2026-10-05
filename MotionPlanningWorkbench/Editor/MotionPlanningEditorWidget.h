@@ -7,6 +7,7 @@
 #include <QWidget>
 
 struct ConfigurationSelectionCatalog;
+struct CdfStageViewData;
 class QDialog;
 class QDoubleSpinBox;
 class QCheckBox;
@@ -60,6 +61,8 @@ public:
 
     struct CdfQpRepairSettings
     {
+        double apfMaxTcpDeviation = 0.10;
+        bool allowEquivalentConfigurations = true;
         double safetyMargin = 0.01;
         double targetClearance = 0.0;
         double finiteDifferenceStep = 5.0e-4;
@@ -70,6 +73,11 @@ public:
         int segmentIntermediateSamples = 2;
         int maxIterations = 1;
         bool keepEndpoints = true;
+        double smoothWeight = 2.0;
+        int smoothingPasses = 6;
+        bool retimeOutput = true;
+        double fallbackVelocityDegrees = 60.0;
+        double fallbackAccelerationDegrees = 120.0;
     };
 
     explicit MotionPlanningEditorWidget(QWidget* parent = nullptr);
@@ -104,6 +112,11 @@ public:
         const QVector<CdfJointAngleRow>& jointRows,
         const QString& emptyText);
     void setCdfExportAvailable(bool available);
+    void setCdfAnalysisStages(const QStringList& names);
+    void setCdfStageView(const QVector<QString>& jointNames, const QVector<CdfJointAngleRow>& rows,
+        const QString& summary);
+    void showCdfAnalysis(const QVector<CdfStageViewData>& stages, const QStringList& jointNames,
+        const QString& diagnostics);
     void setCdfResult(const QString& summary, bool success);
     CdfQpRepairSettings cdfQpRepairSettings() const;
     bool editControlPointPose(ControlPointPoseEditorData& data, const QString& title);
@@ -140,6 +153,12 @@ signals:
     void importCdfJointAnglesRequested();
     void applySelectedCdfJointAnglesRequested(int pointIndex);
     void repairImportedCdfTrajectoryRequested();
+    void cdfStageChanged(int stage);
+    void applyCdfStagePointRequested(int stage, int point);
+    void playCdfStageRequested(int stage, double previewDuration, bool actualTiming);
+    void exportCdfStageRequested(int stage);
+    void cdfAnalysisRequested();
+    void exportCdfQualityRequested();
     void exportCdfTrajectoryRequested();
     void insertControlPointBeforeRequested(int pointIndex);
     void insertControlPointAfterRequested(int pointIndex);
@@ -214,6 +233,7 @@ private:
     QPushButton* m_importCdfButton = nullptr;
     QTableWidget* m_cdfJointTable = nullptr;
     QPushButton* m_applyCdfJointButton = nullptr;
+    QDoubleSpinBox* m_cdfTcpDeviation = nullptr;
     QDoubleSpinBox* m_cdfSafetyMargin = nullptr;
     QDoubleSpinBox* m_cdfTargetClearance = nullptr;
     QDoubleSpinBox* m_cdfFiniteDifferenceStep = nullptr;
@@ -224,9 +244,25 @@ private:
     QSpinBox* m_cdfSegmentIntermediateSamples = nullptr;
     QSpinBox* m_cdfMaxIterations = nullptr;
     QCheckBox* m_cdfKeepEndpoints = nullptr;
+    QCheckBox* m_cdfEquivalentConfigurations = nullptr;
     QPushButton* m_repairCdfTrajectoryButton = nullptr;
     QPushButton* m_exportCdfTrajectoryButton = nullptr;
     QLabel* m_cdfResult = nullptr;
+    QComboBox* m_cdfStageCombo = nullptr;
+    QTableWidget* m_cdfStageTable = nullptr;
+    QLabel* m_cdfStageSummary = nullptr;
+    QPushButton* m_cdfStageApply = nullptr;
+    QPushButton* m_cdfStagePlay = nullptr;
+    QPushButton* m_cdfStageExport = nullptr;
+    QPushButton* m_cdfAnalysisButton = nullptr;
+    QDoubleSpinBox* m_cdfStageDuration = nullptr;
+    QCheckBox* m_cdfStageActualTiming = nullptr;
+    QDoubleSpinBox* m_cdfSmoothWeight = nullptr;
+    QSpinBox* m_cdfSmoothingPasses = nullptr;
+    QCheckBox* m_cdfRetime = nullptr;
+    QDoubleSpinBox* m_cdfFallbackVelocity = nullptr;
+    QDoubleSpinBox* m_cdfFallbackAcceleration = nullptr;
+    QPointer<QDialog> m_cdfAnalysisDialog;
     QLabel* m_result = nullptr;
     bool m_playbackActive = false;
     bool m_cdfExportAvailable = false;
