@@ -75,6 +75,7 @@ namespace robot_qt_viewer
         void applySelectedCdfJointAngles(int pointIndex);
         void repairImportedCdfTrajectory();
         void exportCdfTrajectory();
+        void exportCdfRapid();
         void clearCdfAnalysis();
         void showCdfStage(int stage);
         void applyCdfStagePoint(int stage, int point);

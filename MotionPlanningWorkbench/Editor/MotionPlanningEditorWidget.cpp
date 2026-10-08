@@ -468,6 +468,7 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
     layout->addWidget(poseTitle);
 
     m_poseTable = new QTableWidget(this);
+    m_poseTable->setObjectName(QStringLiteral("cartesianControlPoints"));
     configureTrajectoryTable(m_poseTable, {
         QStringLiteral("#"),
         QStringLiteral("t"),
@@ -725,6 +726,7 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
     cdfRepairForm->addRow(QString(), m_cdfEquivalentConfigurations);
 
     m_cdfSafetyMargin = makePoseSpinBox(cdfPage, 0.0, 1.0, 0.01, 0.001, QStringLiteral(" m"));
+    m_cdfSafetyMargin->setObjectName(QStringLiteral("cdfSafetyMargin"));
     cdfRepairForm->addRow(QStringLiteral("Safety margin"), m_cdfSafetyMargin);
 
     m_cdfTargetClearance = makePoseSpinBox(cdfPage, 0.0, 1.0, 0.0, 0.001, QStringLiteral(" m"));
@@ -784,6 +786,12 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
         QStringLiteral("Export APF + CDF/QP trajectory..."),
         cdfPage);
     cdfLayout->addWidget(m_exportCdfTrajectoryButton);
+    m_exportCdfRapidButton = new QPushButton(QStringLiteral("\u5bfc\u51fa CDF RAPID \u7a0b\u5e8f\uff08.mod\uff09..."), cdfPage);
+    m_exportCdfRapidButton->setObjectName(QStringLiteral("exportCdfRapid"));
+    m_exportCdfRapidButton->setToolTip(QStringLiteral("\u6309 MainModule.mod \u6a21\u677f\u5bfc\u51fa\u5168\u90e8 CDF TCP \u76ee\u6807\u5750\u6807\uff0c\u56fa\u5b9a\u4f7f\u7528 MoveL/v50/z10/tool0 \u548c wobj0\uff0c\u4e0d\u8f93\u51fa\u81ea\u5b9a\u4e49\u5de5\u5177\u3002tool0 \u5c06\u8fd9\u4e9b\u5750\u6807\u89e3\u91ca\u4e3a\u6cd5\u5170\u76ee\u6807\uff1b\u672a\u81ea\u52a8\u8865\u507f\u55b7\u67aa\u504f\u7f6e\u3002"));
+    cdfLayout->addWidget(m_exportCdfRapidButton);
+    connect(m_exportCdfRapidButton, &QPushButton::clicked,
+        this, &MotionPlanningEditorWidget::exportCdfRapidRequested);
 
     m_cdfResult = new QLabel(QStringLiteral("Import a CDF joint angle file."), cdfPage);
     m_cdfResult->setWordWrap(true);
@@ -1325,6 +1333,9 @@ void MotionPlanningEditorWidget::updateCdfActions()
     }
     if(m_exportCdfTrajectoryButton != nullptr) {
         m_exportCdfTrajectoryButton->setEnabled(hasRobot && m_cdfExportAvailable);
+    }
+    if(m_exportCdfRapidButton) {
+        m_exportCdfRapidButton->setEnabled(hasRobot && m_cdfExportAvailable && !m_playbackActive);
     }
     const bool hasStage = m_cdfStageCombo && m_cdfStageCombo->count() > 0;
     if(m_cdfStageCombo) m_cdfStageCombo->setEnabled(hasStage && !m_playbackActive);

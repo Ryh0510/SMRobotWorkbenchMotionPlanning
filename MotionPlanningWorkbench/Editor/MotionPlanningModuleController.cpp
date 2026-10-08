@@ -19,6 +19,7 @@
 #include <ProjectMotionPlanning/TrajectoryImport.h>
 #include <ProjectMotionPlanning/TrajectoryInverseKinematics.h>
 #include <ProjectMotionPlanning/LayeredIkGraph.h>
+#include <ProjectMotionPlanning/RapidTrajectoryExport.h>
 #include <SimulationProject/ProjectDocumentService.h>
 #include <SimulationProject/RuntimePaths.h>
 
@@ -648,6 +649,8 @@ namespace robot_qt_viewer
             });
         connect(&m_widget, &MotionPlanningEditorWidget::exportCdfTrajectoryRequested,
             this, &MotionPlanningModuleController::exportCdfTrajectory);
+        connect(&m_widget, &MotionPlanningEditorWidget::exportCdfRapidRequested,
+            this, &MotionPlanningModuleController::exportCdfRapid);
         connect(&m_widget, &MotionPlanningEditorWidget::cdfStageChanged, this, &MotionPlanningModuleController::showCdfStage);
         connect(&m_widget, &MotionPlanningEditorWidget::applyCdfStagePointRequested, this, &MotionPlanningModuleController::applyCdfStagePoint);
         connect(&m_widget, &MotionPlanningEditorWidget::playCdfStageRequested, this, &MotionPlanningModuleController::playCdfStage);
@@ -1368,12 +1371,12 @@ namespace robot_qt_viewer
                 .arg(sourceName, QString::fromStdString(robotId))
                 .arg(static_cast<qulonglong>(seedTrajectory.points.size()))
                 .arg(QString::fromStdWString(basePath.wstring())));
-            report(QStringLiteral("QP rounds=%1, safety=%2, clearance=%3, distance horizon=%4, FD=%5, trust=%6, corridor=%7, seed weight=%8, intermediate=%9, endpoints=%10, smoothing=%11, optimization step=%12, collision step=%13")
+            report(QStringLiteral("QP rounds=%1, safety=%2, clearance=%3, distance horizon=%4, FD=%5, trust=%6, corridor=%7, seed weight=%8, intermediate=%9, endpoints=%10, smoothing=%11, optimization step=%12, requested collision step=%13")
                 .arg(options.maxIterations).arg(options.safetyMargin).arg(options.targetClearance)
                 .arg(options.distanceThreshold).arg(options.finiteDifferenceStep).arg(options.trustRegion)
                 .arg(options.seedCorridor).arg(options.seedTrackingWeight).arg(options.segmentIntermediateSamples)
                 .arg(options.keepEndpoints).arg(options.postSmoothingIterations)
-                .arg(options.optimizationMaxJointStep).arg(std::min(options.validationMaxJointStep, 0.001)));
+                .arg(options.optimizationMaxJointStep).arg(options.validationMaxJointStep));
             if(!logOpened) report(QStringLiteral("Cannot write log: %1").arg(log.errorString()));
             report(QStringLiteral("Curvature weight=%1, refinement passes=%2, retime=%3, fallback velocity=%4 rad/s, fallback acceleration=%5 rad/s^2")
                 .arg(options.smoothWeight).arg(options.postSmoothingIterations).arg(options.retimeOutput)
@@ -1599,6 +1602,50 @@ namespace robot_qt_viewer
     void MotionPlanningModuleController::exportCdfTrajectory()
     {
         exportJointTrajectory(true);
+    }
+
+    void MotionPlanningModuleController::exportCdfRapid()
+    {
+        const auto showResult = [this](const QString& message, bool success) {
+            m_widget.setCdfResult(message, success);
+            emit statusMessageRequested(message, 9000);
+        };
+        // Capture the plan and actual TCP before the modal save dialog can deliver
+        // document changes. The exporter never changes the displayed robot.
+        const auto document = m_context.document();
+        const auto plans = motion_planning::MotionPlanningProjectStore::plans(document);
+        const auto* plan = findMotionPlan(plans, m_selectedRobotId, m_selectedTrajectoryId);
+        if(!plan || !isCdfQpTrajectory(*plan)) {
+            showResult(QStringLiteral("\u8bf7\u5148\u9009\u62e9 CDF/QP \u4f18\u5316\u5f97\u5230\u7684\u6700\u7ec8\u5173\u8282\u8f68\u8ff9\u3002"), false);
+            return;
+        }
+        auto* viewport = m_context.motionPlanningViewport();
+        motion_planning::RapidTrajectoryExportOptions options;
+        if(viewport) {
+            options.worldTcpForwardKinematics = viewport->robotForwardKinematics(
+                m_selectedRobotId, plan->jointNames, true);
+        }
+        options.mapIrb4600StoredJointSigns = usesIrb4600RobotSystemJointSigns(document, m_selectedRobotId);
+        const auto result = motion_planning::ProjectRapidTrajectoryExporter::generate(
+            document, projectBasePath(m_context.projectSession()), *plan, options);
+        if(!result.success) {
+            showResult(QStringLiteral("RAPID \u5bfc\u51fa\u5931\u8d25\uff1a%1").arg(QString::fromStdString(result.error)), false);
+            return;
+        }
+        QString path = getSaveFileName(QStringLiteral("motionPlanning.cdfRapid.save"), &m_widget,
+            QStringLiteral("\u5bfc\u51fa CDF RAPID \u7a0b\u5e8f"), QStringLiteral("MainModule.mod"),
+            QStringLiteral("ABB RAPID Module (*.mod);;All Files (*)"));
+        if(path.isEmpty()) { return; }
+        if(!path.endsWith(QStringLiteral(".mod"), Qt::CaseInsensitive)) { path += QStringLiteral(".mod"); }
+        QSaveFile file(path);
+        if(!file.open(QIODevice::WriteOnly) ||
+            file.write(result.program.data(), static_cast<qint64>(result.program.size())) !=
+                static_cast<qint64>(result.program.size()) || !file.commit()) {
+            showResult(QStringLiteral("RAPID \u6587\u4ef6\u4fdd\u5b58\u5931\u8d25\uff1a%1").arg(file.errorString()), false);
+            return;
+        }
+        showResult(QStringLiteral("\u5df2\u5bfc\u51fa %1 \u4e2a CDF \u76ee\u6807\u70b9\uff1a%2\n\u683c\u5f0f\uff1aMainModule\uff0cMoveL/v50/z10/tool0\uff0cwobj0\uff1b\u4fdd\u7559\u5f53\u524d TCP \u76ee\u6807\u5750\u6807\uff0c\u6309 tool0 \u89e3\u91ca\u4e3a\u6cd5\u5170\u76ee\u6807\u3002")
+            .arg(static_cast<qulonglong>(result.pointCount)).arg(path), true);
     }
 
     void MotionPlanningModuleController::exportJointTrajectory(bool cdfOnly)
