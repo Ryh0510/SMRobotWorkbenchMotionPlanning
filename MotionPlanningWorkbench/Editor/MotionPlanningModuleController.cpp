@@ -2042,6 +2042,16 @@ namespace robot_qt_viewer
             !services->isFramePresented(m_playbackFrameTicket)) {
             return;
         }
+        if(m_playbackFrameTicket != 0) {
+            m_playbackFrameTicket = 0;
+            const qint64 nowMs = m_playbackClock.elapsed();
+            if(m_playbackPointIndex >= pointCount || nowMs - m_playbackLastNotifyMs >= 50) {
+                m_playbackLastNotifyMs = nowMs;
+                m_context.documentController().publishRobotRuntimeChanged(QStringLiteral("motionPlanningPlayback"));
+                if(m_playbackPlan != playbackPlan) { return; }
+                if(m_sprayMeasurementEnabled) { updateSprayMeasurement(); }
+            }
+        }
         if(m_playbackPointIndex >= pointCount) {
             m_playbackFinishedNaturally = true;
             stopJointPlayback();
@@ -2095,14 +2105,6 @@ namespace robot_qt_viewer
             return;
         }
         m_playbackFrameTicket = services ? services->requestFramePresentation() : 0;
-        const bool finished = m_playbackPointIndex >= pointCount;
-        const qint64 nowMs = m_playbackClock.elapsed();
-        if(finished || nowMs - m_playbackLastNotifyMs >= 50) {
-            m_playbackLastNotifyMs = nowMs;
-            m_context.documentController().publishRobotRuntimeChanged(QStringLiteral("motionPlanningPlayback"));
-            if(m_playbackPlan != playbackPlan) { return; }
-            if(m_sprayMeasurementEnabled) { updateSprayMeasurement(); }
-        }
         // Completion/export is published on the next tick, after this final
         // display pose has actually been presented by the viewport.
     }
