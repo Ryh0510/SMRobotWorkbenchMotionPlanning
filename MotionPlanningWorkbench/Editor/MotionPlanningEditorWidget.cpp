@@ -37,12 +37,12 @@ namespace
     constexpr int kOriginalPointIndexRole = Qt::UserRole + 101;
     constexpr int kLargeTrajectoryTablePreviewLimit = 1000;
 
-    class SprayCurveWidget : public QWidget
+    class TrajectoryCurveWidget : public QWidget
     {
     public:
-        SprayCurveWidget(const QVector<double>& values, const QString& title,
-            const QColor& color, QWidget* parent)
-            : QWidget(parent), m_values(values), m_title(title), m_color(color)
+        TrajectoryCurveWidget(const QVector<double>& values, const QString& title,
+            const QColor& color, QWidget* parent, bool showZeroBaseline = false)
+            : QWidget(parent), m_values(values), m_title(title), m_color(color), m_showZeroBaseline(showZeroBaseline)
         {
             setMinimumSize(420, 210);
         }
@@ -64,15 +64,22 @@ namespace
             }
             const bool hasValid = low <= high;
             if(!hasValid) { low = 0.0; high = 1.0; }
+            if(m_showZeroBaseline) {
+                low = std::min(low, 0.0);
+                high = std::max(high, 0.0);
+            }
             const double padding = std::max((high - low) * 0.08, 0.1);
             low -= padding;
             high += padding;
+            const double zeroY = plot.bottom() + low / (high - low) * plot.height();
             const QColor textColor = palette().text().color();
             painter.setPen(textColor);
             painter.drawText(QRectF(76, 5, plot.width(), 24), Qt::AlignLeft, m_title);
             for(int tick = 0; tick <= 4; ++tick) {
                 const double fraction = tick / 4.0;
                 const double y = plot.bottom() - fraction * plot.height();
+                // Reserve space for the explicit zero label, including small/constant ranges.
+                if(m_showZeroBaseline && std::abs(y - zeroY) < 18.0) { continue; }
                 painter.setPen(palette().mid().color());
                 painter.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y));
                 painter.setPen(textColor);
@@ -92,10 +99,24 @@ namespace
             }
             painter.setPen(textColor);
             painter.drawRect(plot);
+            if(m_showZeroBaseline) {
+                painter.save();
+                const QColor zeroColor = palette().base().color().lightness() < 128
+                    ? QColor(255, 195, 70) : QColor(145, 75, 0);
+                painter.setPen(QPen(zeroColor, 2.2, Qt::DashLine));
+                painter.drawLine(QPointF(plot.left(), zeroY), QPointF(plot.right(), zeroY));
+                auto zeroFont = painter.font();
+                zeroFont.setBold(true);
+                painter.setFont(zeroFont);
+                painter.setPen(zeroColor);
+                painter.drawText(QRectF(0, zeroY - 10, 68, 20), Qt::AlignRight | Qt::AlignVCenter,
+                    QStringLiteral("0 mm"));
+                painter.restore();
+            }
             painter.drawText(QRectF(plot.left(), height() - 24, plot.width(), 22), Qt::AlignCenter,
                 QStringLiteral("Trajectory point"));
             if(!hasValid) {
-                painter.drawText(plot, Qt::AlignCenter, QStringLiteral("No valid surface intersections"));
+                painter.drawText(plot, Qt::AlignCenter, QStringLiteral("No valid samples"));
                 return;
             }
             painter.save();
@@ -122,6 +143,7 @@ namespace
         QVector<double> m_values;
         QString m_title;
         QColor m_color;
+        bool m_showZeroBaseline = false;
     };
 
     void configureTrajectoryTable(
@@ -680,6 +702,11 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
     m_plotSprayMeasurements->setEnabled(false);
     layout->addWidget(m_exportSprayMeasurements);
     layout->addWidget(m_plotSprayMeasurements);
+    m_plotNearestDistances = new QPushButton(QStringLiteral("\u7ed8\u5236\u6700\u8fd1\u8ddd\u79bb\u53d8\u5316\u56fe"), basicPage);
+    m_plotNearestDistances->setObjectName(QStringLiteral("plotNearestDistances"));
+    m_plotNearestDistances->setToolTip(QStringLiteral("Query every source point of the last playback using its collision scene snapshot. Playback must be stopped."));
+    layout->addWidget(m_plotNearestDistances);
+    connect(m_plotNearestDistances, &QPushButton::clicked, this, &MotionPlanningEditorWidget::plotNearestDistancesRequested);
 
     m_result = new QLabel(QStringLiteral("Select a robot and enter joint vectors."), this);
     m_result->setWordWrap(true);
@@ -793,6 +820,13 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
     connect(m_exportCdfRapidButton, &QPushButton::clicked,
         this, &MotionPlanningEditorWidget::exportCdfRapidRequested);
 
+    m_exportCdfFanucButton = new QPushButton(QStringLiteral("\u5bfc\u51fa\u53d1\u90a3\u79d1\u673a\u5668\u4eba\u7a0b\u5e8f\uff08.LS\uff09..."), cdfPage);
+    m_exportCdfFanucButton->setObjectName(QStringLiteral("exportCdfFanuc"));
+    m_exportCdfFanucButton->setToolTip(QStringLiteral("\u6309 JHA.LS \u683c\u5f0f\u5bfc\u51fa\u5b8c\u6574 CDF \u6700\u7ec8 TCP \u8f68\u8ff9\uff1aXYZ(mm)\u3001W/P/R(deg)\uff0cUF=2\u3001UT=1\u3001L/400mm/sec/CNT100\u3002\u4f7f\u7528\u5f53\u524d TCP \u4e16\u754c\u5750\u6807\uff0c\u9700\u5728\u63a7\u5236\u5668\u4e2d\u5339\u914d UF2 \u4e0e UT1\u3002CONFIG \u6cbf\u7528\u6a21\u677f N U T, 0, 0, 0\uff0c\u5e76\u975e\u53d1\u90a3\u79d1\u9006\u89e3\u7ed3\u679c\u3002"));
+    cdfLayout->addWidget(m_exportCdfFanucButton);
+    connect(m_exportCdfFanucButton, &QPushButton::clicked,
+        this, &MotionPlanningEditorWidget::exportCdfFanucRequested);
+
     m_cdfResult = new QLabel(QStringLiteral("Import a CDF joint angle file."), cdfPage);
     m_cdfResult->setWordWrap(true);
     cdfLayout->addWidget(m_cdfResult);
@@ -835,6 +869,45 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
     connect(m_cdfAnalysisButton, &QPushButton::clicked, this, &MotionPlanningEditorWidget::cdfAnalysisRequested);
     connect(m_cdfStageActualTiming, &QCheckBox::toggled, this, [this]() { updateCdfActions(); });
     cdfLayout->addStretch(1);
+
+    auto* transformPage = new QWidget(tabs);
+    transformPage->setObjectName(QStringLiteral("trajectoryTransformPage"));
+    auto* transformLayout = new QVBoxLayout(transformPage);
+    tabs->addTab(transformPage, QStringLiteral("Trajectory Transform"));
+    auto* transformHelp = new QLabel(QStringLiteral(
+        "\u4e0e Basic Planning \u5171\u7528\u5f53\u524d\u8f68\u8ff9\u3002\u5bfc\u5165\u540e\u81ea\u52a8\u663e\u793a\u8f68\u8ff9\u70b9\u3002\n"
+        "\u652f\u6301 4x4 \u77e9\u9635+\u65f6\u95f4\u548c\u4f4d\u7f6e/\u56db\u5143\u6570\u768412\u5217\u683c\u5f0f\u3002\n"
+        "\u6574\u4f53\u53d8\u6362\u4f1a\u540c\u65f6\u6539\u53d8\u4f4d\u7f6e\u548c\u59ff\u6001\uff0c\u5e76\u6e05\u9664\u8be5\u8f68\u8ff9\u65e7\u7684\u9006\u89e3\u3002"), transformPage);
+    transformHelp->setWordWrap(true);
+    transformLayout->addWidget(transformHelp);
+    m_transformTrajectoryCombo = new QComboBox(transformPage);
+    m_transformTrajectoryCombo->setObjectName(QStringLiteral("transformTrajectorySelection"));
+    transformLayout->addWidget(m_transformTrajectoryCombo);
+    m_transformImport = new QPushButton(QStringLiteral("\u5bfc\u5165\u8f68\u8ff9"), transformPage);
+    m_transformDelete = new QPushButton(QStringLiteral("\u5220\u9664\u8f68\u8ff9"), transformPage);
+    m_transformApply = new QPushButton(QStringLiteral("\u53d8\u6362\u8f68\u8ff9"), transformPage);
+    m_transformExport = new QPushButton(QStringLiteral("\u5bfc\u51fa\u8f68\u8ff9"), transformPage);
+    m_transformImport->setObjectName(QStringLiteral("importTransformTrajectory"));
+    m_transformDelete->setObjectName(QStringLiteral("deleteTransformTrajectory"));
+    m_transformApply->setObjectName(QStringLiteral("transformTrajectory"));
+    m_transformExport->setObjectName(QStringLiteral("exportTransformTrajectory"));
+    for(auto* control : {m_transformImport, m_transformDelete, m_transformApply, m_transformExport}) {
+        transformLayout->addWidget(control);
+    }
+    m_transformResult = new QLabel(transformPage);
+    m_transformResult->setWordWrap(true);
+    transformLayout->addWidget(m_transformResult);
+    transformLayout->addStretch(1);
+    connect(m_transformImport, &QPushButton::clicked, this, &MotionPlanningEditorWidget::importTransformTrajectoryRequested);
+    connect(m_transformDelete, &QPushButton::clicked, this, &MotionPlanningEditorWidget::deleteTransformTrajectoryRequested);
+    connect(m_transformApply, &QPushButton::clicked, this, &MotionPlanningEditorWidget::transformTrajectoryRequested);
+    connect(m_transformExport, &QPushButton::clicked, this, &MotionPlanningEditorWidget::exportTransformTrajectoryRequested);
+    connect(m_transformTrajectoryCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index) {
+        if(index >= 0) {
+            emit trajectorySelectionChanged(m_transformTrajectoryCombo->currentData().toString());
+            setTrajectoryPointsVisible(true);
+        }
+    });
 
     connect(m_planButton, &QPushButton::clicked, this, [this]() {
         emit planRequested(
@@ -987,11 +1060,75 @@ void MotionPlanningEditorWidget::showSprayMeasurementPlot(
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->setWindowTitle(title);
     auto* layout = new QVBoxLayout(dialog);
-    layout->addWidget(new SprayCurveWidget(distancesMm, QStringLiteral("Spray distance (mm)"),
+    layout->addWidget(new TrajectoryCurveWidget(distancesMm, QStringLiteral("Spray distance (mm)"),
         QColor(0, 145, 160), dialog), 1);
-    layout->addWidget(new SprayCurveWidget(anglesDegrees, QStringLiteral("Spray angle (deg)"),
+    layout->addWidget(new TrajectoryCurveWidget(anglesDegrees, QStringLiteral("Spray angle (deg)"),
         QColor(205, 80, 85), dialog), 1);
     dialog->resize(760, 600);
+    dialog->show();
+}
+
+bool MotionPlanningEditorWidget::editTrajectoryTransform(QVector<double>& translationMm, QVector<double>& rotationDegrees)
+{
+    QDialog dialog(this);
+    dialog.setObjectName(QStringLiteral("trajectoryTransformDialog"));
+    dialog.setWindowTitle(QStringLiteral("\u53d8\u6362\u8f68\u8ff9"));
+    auto* layout = new QFormLayout(&dialog);
+    auto* help = new QLabel(QStringLiteral("\u7ed5\u4e16\u754c\u539f\u70b9\uff0c\u4f9d\u6b21\u7ed5\u56fa\u5b9a X\u3001Y\u3001Z \u8f74\u65cb\u8f6c\uff0c\u518d\u6cbf\u4e16\u754c\u8f74\u5e73\u79fb\u3002\n"
+        "\u4f4d\u7f6e\u4e0e\u59ff\u6001\u540c\u65f6\u53d8\u6362\uff1b\u6bcf\u6b21\u64cd\u4f5c\u7d2f\u8ba1\u4f5c\u7528\u4e8e\u5f53\u524d\u8f68\u8ff9\u3002"), &dialog);
+    help->setWordWrap(true);
+    layout->addRow(help);
+    QVector<QDoubleSpinBox*> fields;
+    const QStringList labels = {QStringLiteral("X \u5e73\u79fb (mm)"), QStringLiteral("Y \u5e73\u79fb (mm)"),
+        QStringLiteral("Z \u5e73\u79fb (mm)"), QStringLiteral("X \u65cb\u8f6c (deg)"), QStringLiteral("Y \u65cb\u8f6c (deg)"), QStringLiteral("Z \u65cb\u8f6c (deg)")};
+    for(int i = 0; i < 6; ++i) {
+        auto* field = new QDoubleSpinBox(&dialog);
+        field->setObjectName(QStringLiteral("transformValue%1").arg(i));
+        field->setRange(i < 3 ? -1.0e6 : -36000.0, i < 3 ? 1.0e6 : 36000.0);
+        field->setDecimals(6);
+        field->setSingleStep(1.0);
+        fields.push_back(field);
+        layout->addRow(labels[i], field);
+    }
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    layout->addRow(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    if(dialog.exec() != QDialog::Accepted) return false;
+    translationMm = {fields[0]->value(), fields[1]->value(), fields[2]->value()};
+    rotationDegrees = {fields[3]->value(), fields[4]->value(), fields[5]->value()};
+    return true;
+}
+
+void MotionPlanningEditorWidget::setTrajectoryPointsVisible(bool visible)
+{
+    m_trajectoryPointsVisible->setChecked(visible);
+}
+
+void MotionPlanningEditorWidget::setNearestDistanceAvailable(bool available)
+{
+    m_nearestDistanceAvailable = available;
+    updateTrajectoryActions();
+}
+
+void MotionPlanningEditorWidget::showNearestDistancePlot(const QVector<double>& distancesMm,
+    const QString& summary, const QString& report)
+{
+    auto* dialog = new QDialog(this, Qt::Window);
+    dialog->setObjectName(QStringLiteral("nearestDistancePlot"));
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowTitle(QStringLiteral("\u6700\u8fd1\u8ddd\u79bb\u53d8\u5316\u56fe"));
+    auto* layout = new QVBoxLayout(dialog);
+    auto* label = new QLabel(summary, dialog);
+    label->setWordWrap(true);
+    label->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    layout->addWidget(label);
+    layout->addWidget(new TrajectoryCurveWidget(distancesMm, QStringLiteral("Nearest distance (mm)"), QColor(0, 145, 160), dialog, true), 1);
+    auto* exportButton = new QPushButton(QStringLiteral("\u5bfc\u51fa\u6700\u8fd1\u8ddd\u79bb TXT..."), dialog);
+    exportButton->setObjectName(QStringLiteral("exportNearestDistances"));
+    connect(exportButton, &QPushButton::clicked, dialog, [this, report]() { emit exportNearestDistancesRequested(report); });
+    layout->addWidget(exportButton);
+    dialog->resize(850, 540);
     dialog->show();
 }
 
@@ -1052,6 +1189,7 @@ MotionPlanningEditorWidget::CdfQpRepairSettings MotionPlanningEditorWidget::cdfQ
 void MotionPlanningEditorWidget::setResult(const QString& summary, bool success)
 {
     m_result->setText(summary);
+    if(m_transformResult) { m_transformResult->setText(summary); }
     m_result->setProperty("error", !success);
     m_result->style()->unpolish(m_result);
     m_result->style()->polish(m_result);
@@ -1097,6 +1235,18 @@ void MotionPlanningEditorWidget::setTrajectoryView(
     }
     m_trajectoryCombo->setEnabled(m_trajectoryCombo->count() > 0);
 
+    {
+        const QSignalBlocker blocker(m_transformTrajectoryCombo);
+        m_transformTrajectoryCombo->clear();
+        int selected = -1;
+        for(const auto& trajectory : trajectories) {
+            if(!trajectory.kind.contains(QStringLiteral("cartesian"))) continue;
+            m_transformTrajectoryCombo->addItem(QStringLiteral("%1 (%2 points)")
+                .arg(trajectory.label).arg(trajectory.pointCount), trajectory.id);
+            if(trajectory.id == selectedTrajectoryId) selected = m_transformTrajectoryCombo->count() - 1;
+        }
+        m_transformTrajectoryCombo->setCurrentIndex(selected);
+    }
     populateTrajectoryTable(m_poseTable, posePoints, emptyPoseText);
     populateTrajectoryTable(m_jointTable, jointPoints, emptyJointText);
     updateTrajectoryActions();
@@ -1248,6 +1398,15 @@ void MotionPlanningEditorWidget::updateTrajectoryActions()
     const bool hasValidJointRow = selectedOriginalPointIndex(m_jointTable) >= 0;
     const bool hasAnyJointRow = hasAnyOriginalPointRow(m_jointTable);
 
+    if(m_transformImport) {
+        const bool idle = !m_playbackActive && !m_multiIkBusy && !m_graphBusy;
+        m_transformImport->setEnabled(hasRobot && idle);
+        m_transformTrajectoryCombo->setEnabled(idle);
+        m_transformDelete->setEnabled(hasCartesian && idle);
+        m_transformApply->setEnabled(hasCartesian && idle);
+        m_transformExport->setEnabled(hasCartesian && idle);
+        m_plotNearestDistances->setEnabled(m_nearestDistanceAvailable && !m_playbackActive);
+    }
     if(m_graphFilter) {
         m_graphFilter->setEnabled(m_graphBusy || (!m_multiIkBusy && m_multiIkComplete && !m_playbackActive));
         m_graphView->setEnabled(!m_graphBusy && !m_multiIkBusy && (m_graphResults->rowCount() > 0 || m_graphStartResults->rowCount() > 0));
@@ -1336,6 +1495,9 @@ void MotionPlanningEditorWidget::updateCdfActions()
     }
     if(m_exportCdfRapidButton) {
         m_exportCdfRapidButton->setEnabled(hasRobot && m_cdfExportAvailable && !m_playbackActive);
+    }
+    if(m_exportCdfFanucButton) {
+        m_exportCdfFanucButton->setEnabled(hasRobot && m_cdfExportAvailable && !m_playbackActive);
     }
     const bool hasStage = m_cdfStageCombo && m_cdfStageCombo->count() > 0;
     if(m_cdfStageCombo) m_cdfStageCombo->setEnabled(hasStage && !m_playbackActive);

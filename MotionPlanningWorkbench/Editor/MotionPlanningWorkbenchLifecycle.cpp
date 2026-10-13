@@ -29,7 +29,7 @@ namespace robot_qt_viewer
                 panel->setMinimumWidth(0);
                 panel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
                 panel->setWidgetResizable(true);
-                panel->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+                panel->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
                 panel->setFrameShape(QFrame::NoFrame);
                 auto* widget = new MotionPlanningEditorWidget(panel);
                 auto* controller = new MotionPlanningModuleController(

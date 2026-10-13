@@ -55,7 +55,12 @@ namespace robot_qt_viewer
             const QString& jointNames,
             double duration,
             int sampleCount);
-        void importTrajectory();
+        void importTrajectory(bool transformPage = false);
+        void deleteTransformTrajectory();
+        void transformTrajectory();
+        void exportTransformTrajectory();
+        void plotNearestDistances();
+        void exportNearestDistances(const QString& report);
         void importCdfJointAngles();
         void solveMultiIk(bool useTool, const QVector<double>& lowerDegrees,
             const QVector<double>& upperDegrees, int seeds);
@@ -76,6 +81,7 @@ namespace robot_qt_viewer
         void repairImportedCdfTrajectory();
         void exportCdfTrajectory();
         void exportCdfRapid();
+        void exportCdfFanuc();
         void clearCdfAnalysis();
         void showCdfStage(int stage);
         void applyCdfStagePoint(int stage, int point);
@@ -144,6 +150,10 @@ namespace robot_qt_viewer
         std::vector<std::size_t> m_multiIkSelections;
         std::unique_ptr<motion_planning::StoredMotionPlan> m_multiIkPlayback;
         std::shared_ptr<const motion_planning::StoredMotionPlan> m_playbackPlan;
+        std::shared_ptr<const motion_planning::StoredMotionPlan> m_distancePlan;
+        std::vector<std::vector<double>> m_distanceRuntimePoints;
+        QString m_distanceRecordedAt;
+        bool m_distanceBusy = false;
         std::unique_ptr<motion_planning::JointPlaybackTimeline> m_playbackTimeline;
         QElapsedTimer m_playbackClock;
         qint64 m_playbackLastTickNs = 0;

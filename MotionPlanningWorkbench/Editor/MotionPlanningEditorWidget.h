@@ -120,6 +120,11 @@ public:
     void setCdfResult(const QString& summary, bool success);
     CdfQpRepairSettings cdfQpRepairSettings() const;
     bool editControlPointPose(ControlPointPoseEditorData& data, const QString& title);
+    bool editTrajectoryTransform(QVector<double>& translationMm, QVector<double>& rotationDegrees);
+    void setTrajectoryPointsVisible(bool visible);
+    void setNearestDistanceAvailable(bool available);
+    void showNearestDistancePlot(const QVector<double>& distancesMm, const QString& summary,
+        const QString& report);
     void setPlaybackActive(bool active);
     void setSprayMeasurementText(const QString& text);
     void setSprayRecordingState(bool hasSamples, bool active, bool exportPending);
@@ -134,6 +139,12 @@ signals:
         double duration,
         int sampleCount);
     void importTrajectoryRequested();
+    void importTransformTrajectoryRequested();
+    void deleteTransformTrajectoryRequested();
+    void transformTrajectoryRequested();
+    void exportTransformTrajectoryRequested();
+    void plotNearestDistancesRequested();
+    void exportNearestDistancesRequested(const QString& report);
     void multiIkRequested(bool useTool, const QVector<double>& lowerDegrees,
         const QVector<double>& upperDegrees, int seeds);
     void multiIkCancelRequested();
@@ -161,6 +172,7 @@ signals:
     void exportCdfQualityRequested();
     void exportCdfTrajectoryRequested();
     void exportCdfRapidRequested();
+    void exportCdfFanucRequested();
     void insertControlPointBeforeRequested(int pointIndex);
     void insertControlPointAfterRequested(int pointIndex);
     void deleteControlPointRequested(int pointIndex);
@@ -182,6 +194,14 @@ private:
     void showControlPointContextMenu(const QPoint& pos);
 
     QTabWidget* m_tabs = nullptr;
+    QComboBox* m_transformTrajectoryCombo = nullptr;
+    QLabel* m_transformResult = nullptr;
+    QPushButton* m_transformImport = nullptr;
+    QPushButton* m_transformDelete = nullptr;
+    QPushButton* m_transformApply = nullptr;
+    QPushButton* m_transformExport = nullptr;
+    QPushButton* m_plotNearestDistances = nullptr;
+    bool m_nearestDistanceAvailable = false;
     QSpinBox* m_graphMaxPaths = nullptr;
     QSpinBox* m_graphPerStartPaths = nullptr;
     QTabWidget* m_graphResultTabs = nullptr;
@@ -249,6 +269,7 @@ private:
     QPushButton* m_repairCdfTrajectoryButton = nullptr;
     QPushButton* m_exportCdfTrajectoryButton = nullptr;
     QPushButton* m_exportCdfRapidButton = nullptr;
+    QPushButton* m_exportCdfFanucButton = nullptr;
     QLabel* m_cdfResult = nullptr;
     QComboBox* m_cdfStageCombo = nullptr;
     QTableWidget* m_cdfStageTable = nullptr;

@@ -20,6 +20,7 @@
 #include <ProjectMotionPlanning/TrajectoryInverseKinematics.h>
 #include <ProjectMotionPlanning/LayeredIkGraph.h>
 #include <ProjectMotionPlanning/RapidTrajectoryExport.h>
+#include <ProjectMotionPlanning/FanucTrajectoryExport.h>
 #include <SimulationProject/ProjectDocumentService.h>
 #include <SimulationProject/RuntimePaths.h>
 
@@ -28,8 +29,10 @@
 #include <QDialog>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QLabel>
 #include <QPlainTextEdit>
+#include <QPushButton>
 #include <QStandardPaths>
 #include <QVBoxLayout>
 #include <QFileDialog>
@@ -586,7 +589,19 @@ namespace robot_qt_viewer
         connect(&m_widget, &MotionPlanningEditorWidget::planRequested,
             this, &MotionPlanningModuleController::planTrajectory);
         connect(&m_widget, &MotionPlanningEditorWidget::importTrajectoryRequested,
-            this, &MotionPlanningModuleController::importTrajectory);
+            this, [this]() { importTrajectory(); });
+        connect(&m_widget, &MotionPlanningEditorWidget::importTransformTrajectoryRequested,
+            this, [this]() { importTrajectory(true); });
+        connect(&m_widget, &MotionPlanningEditorWidget::deleteTransformTrajectoryRequested,
+            this, &MotionPlanningModuleController::deleteTransformTrajectory);
+        connect(&m_widget, &MotionPlanningEditorWidget::transformTrajectoryRequested,
+            this, &MotionPlanningModuleController::transformTrajectory);
+        connect(&m_widget, &MotionPlanningEditorWidget::exportTransformTrajectoryRequested,
+            this, &MotionPlanningModuleController::exportTransformTrajectory);
+        connect(&m_widget, &MotionPlanningEditorWidget::plotNearestDistancesRequested,
+            this, &MotionPlanningModuleController::plotNearestDistances);
+        connect(&m_widget, &MotionPlanningEditorWidget::exportNearestDistancesRequested,
+            this, &MotionPlanningModuleController::exportNearestDistances);
         connect(&m_widget, &MotionPlanningEditorWidget::importCdfJointAnglesRequested,
             this, &MotionPlanningModuleController::importCdfJointAngles);
         connect(&m_widget, &MotionPlanningEditorWidget::layeredGraphRequested,
@@ -651,6 +666,8 @@ namespace robot_qt_viewer
             this, &MotionPlanningModuleController::exportCdfTrajectory);
         connect(&m_widget, &MotionPlanningEditorWidget::exportCdfRapidRequested,
             this, &MotionPlanningModuleController::exportCdfRapid);
+        connect(&m_widget, &MotionPlanningEditorWidget::exportCdfFanucRequested,
+            this, &MotionPlanningModuleController::exportCdfFanuc);
         connect(&m_widget, &MotionPlanningEditorWidget::cdfStageChanged, this, &MotionPlanningModuleController::showCdfStage);
         connect(&m_widget, &MotionPlanningEditorWidget::applyCdfStagePointRequested, this, &MotionPlanningModuleController::applyCdfStagePoint);
         connect(&m_widget, &MotionPlanningEditorWidget::playCdfStageRequested, this, &MotionPlanningModuleController::playCdfStage);
@@ -868,7 +885,7 @@ namespace robot_qt_viewer
         emit statusMessageRequested(summary, 4000);
     }
 
-    void MotionPlanningModuleController::importTrajectory()
+    void MotionPlanningModuleController::importTrajectory(bool transformPage)
     {
         if(m_selectedRobotId.isEmpty()) {
             m_widget.setResult(QStringLiteral("Select a robot before importing a trajectory."), false);
@@ -901,6 +918,10 @@ namespace robot_qt_viewer
             return;
         }
 
+        if(transformPage && importResult.plan.cartesianControlPoints.empty()) {
+            m_widget.setResult(QStringLiteral("Trajectory Transform requires Cartesian poses, not joint angles."), false);
+            return;
+        }
         const motion_planning::StoredMotionPlan plan = importResult.plan;
         const ProjectMutationResult mutation = m_context.documentController().mutateProject(
             QStringLiteral("motionPlanningImport"),
@@ -927,6 +948,7 @@ namespace robot_qt_viewer
             : QStringLiteral("cartesian control points");
         const QString planId = QString::fromStdString(plan.id);
         m_selectedTrajectoryId = planId;
+        if(transformPage) { m_widget.setTrajectoryPointsVisible(true); }
         refreshTrajectoryView();
 
         QString summary = QStringLiteral("Imported %1 %2 as %3")
@@ -940,6 +962,75 @@ namespace robot_qt_viewer
         m_widget.setResult(summary, true);
         emit trajectoryPlanned(planId);
         emit statusMessageRequested(summary, 5000);
+    }
+
+    void MotionPlanningModuleController::deleteTransformTrajectory()
+    {
+        const auto plans = motion_planning::MotionPlanningProjectStore::plans(m_context.document());
+        const auto* plan = findMotionPlan(plans, m_selectedRobotId, m_selectedTrajectoryId);
+        if(!plan || plan->cartesianControlPoints.empty()) return;
+        const auto id = plan->id;
+        const auto mutation = m_context.documentController().mutateProject(
+            QStringLiteral("motionPlanningDeleteTrajectory"), ProjectDirtyPolicy::UserEdit,
+            [id](simulation_project::ProjectDocumentService& service, bool& changed, std::string& error) {
+                changed = motion_planning::MotionPlanningProjectStore::removePlan(service.document(), id, &error);
+                return changed;
+            });
+        if(mutation.success) {
+            clearGraphCdfSeed();
+            refreshTrajectoryView();
+        }
+        m_widget.setResult(mutation.success ? QStringLiteral("Deleted trajectory: %1").arg(QString::fromStdString(id)) : mutation.message,
+            mutation.success);
+    }
+
+    void MotionPlanningModuleController::transformTrajectory()
+    {
+        const auto plans = motion_planning::MotionPlanningProjectStore::plans(m_context.document());
+        const auto* selected = findMotionPlan(plans, m_selectedRobotId, m_selectedTrajectoryId);
+        if(!selected || selected->cartesianControlPoints.empty()) return;
+        auto plan = *selected;
+        QVector<double> translation, rotation;
+        if(!m_widget.editTrajectoryTransform(translation, rotation)) return;
+        std::string error;
+        if(!motion_planning::ProjectTrajectoryControlPointEditor::transformCartesianTrajectory(plan,
+            Eigen::Vector3d(translation[0], translation[1], translation[2]),
+            Eigen::Vector3d(rotation[0], rotation[1], rotation[2]), &error)) {
+            m_widget.setResult(QString::fromStdString(error), false);
+            return;
+        }
+        if(commitMotionPlanUpdate(plan, QStringLiteral("motionPlanningTransformTrajectory"))) {
+            clearGraphCdfSeed();
+            m_widget.setTrajectoryPointsVisible(true);
+            refreshTrajectoryView();
+            m_widget.setResult(QStringLiteral("Transformed %1 poses. Previous IK results cleared.")
+                .arg(plan.cartesianControlPoints.points.size()), true);
+        }
+    }
+
+    void MotionPlanningModuleController::exportTransformTrajectory()
+    {
+        const auto plans = motion_planning::MotionPlanningProjectStore::plans(m_context.document());
+        const auto* plan = findMotionPlan(plans, m_selectedRobotId, m_selectedTrajectoryId);
+        if(!plan) return;
+        std::string output, error;
+        if(!motion_planning::ProjectTrajectoryControlPointEditor::serializeCartesianMatrices(*plan, output, &error)) {
+            m_widget.setResult(QString::fromStdString(error), false);
+            return;
+        }
+        QString path = getSaveFileName(QStringLiteral("motionPlanning.transform.save"), &m_widget,
+            QStringLiteral("Export transformed trajectory"), QString::fromStdString(plan->name) + QStringLiteral("_transformed.txt"),
+            QStringLiteral("Text Files (*.txt);;All Files (*)"));
+        if(path.isEmpty()) return;
+        if(!path.endsWith(QStringLiteral(".txt"), Qt::CaseInsensitive)) path += QStringLiteral(".txt");
+        QSaveFile file(path);
+        if(!file.open(QIODevice::WriteOnly | QIODevice::Text) ||
+            file.write(output.data(), static_cast<qint64>(output.size())) != static_cast<qint64>(output.size()) || !file.commit()) {
+            m_widget.setResult(QStringLiteral("Export failed: %1").arg(file.errorString()), false);
+            return;
+        }
+        m_widget.setResult(QStringLiteral("Exported %1 poses: %2\n4x4 matrix (mm) + time (s); process columns are not part of this format.")
+            .arg(plan->cartesianControlPoints.points.size()).arg(path), true);
     }
 
     void MotionPlanningModuleController::importCdfJointAngles()
@@ -1648,6 +1739,55 @@ namespace robot_qt_viewer
             .arg(static_cast<qulonglong>(result.pointCount)).arg(path), true);
     }
 
+    void MotionPlanningModuleController::exportCdfFanuc()
+    {
+        const auto showResult = [this](const QString& message, bool success) {
+            m_widget.setCdfResult(message, success);
+            emit statusMessageRequested(message, 10000);
+        };
+        // Freeze the complete final plan and actual-model FK before opening a dialog.
+        const auto document = m_context.document();
+        const auto plans = motion_planning::MotionPlanningProjectStore::plans(document);
+        const auto* plan = findMotionPlan(plans, m_selectedRobotId, m_selectedTrajectoryId);
+        if(!plan || !isCdfQpTrajectory(*plan) || plan->trajectory.empty()) {
+            showResult(QStringLiteral("\u8bf7\u5148\u9009\u62e9 CDF/QP \u4f18\u5316\u5f97\u5230\u7684\u6700\u7ec8\u5173\u8282\u8f68\u8ff9\u3002"), false);
+            return;
+        }
+        motion_planning::FanucTrajectoryExportOptions options;
+        if(auto* viewport = m_context.motionPlanningViewport()) {
+            options.worldTcpForwardKinematics = viewport->robotForwardKinematics(
+                m_selectedRobotId, plan->jointNames, true);
+        }
+        options.mapIrb4600StoredJointSigns = usesIrb4600RobotSystemJointSigns(document, m_selectedRobotId);
+        if(!options.worldTcpForwardKinematics) {
+            showResult(QStringLiteral("\u65e0\u6cd5\u83b7\u53d6\u5f53\u524d\u673a\u5668\u4eba TCP \u6b63\u8fd0\u52a8\u5b66\u5feb\u7167\u3002"), false);
+            return;
+        }
+        QString path = getSaveFileName(QStringLiteral("motionPlanning.cdfFanuc.save"), &m_widget,
+            QStringLiteral("\u5bfc\u51fa\u53d1\u90a3\u79d1\u673a\u5668\u4eba\u7a0b\u5e8f"), QStringLiteral("JHA.LS"),
+            QStringLiteral("FANUC LS Program (*.LS *.ls);;All Files (*)"));
+        if(path.isEmpty()) return;
+        if(!path.endsWith(QStringLiteral(".LS"), Qt::CaseInsensitive)) path += QStringLiteral(".LS");
+        options.programName = QFileInfo(path).completeBaseName().toUpper().toStdString();
+        const auto result = motion_planning::ProjectFanucTrajectoryExporter::generate(*plan, options);
+        if(!result.success) {
+            showResult(QStringLiteral("FANUC \u5bfc\u51fa\u5931\u8d25\uff1a%1\n\u6587\u4ef6\u540d\u8bf7\u4f7f\u7528 1-8 \u4f4d\u82f1\u6587\u5b57\u6bcd/\u6570\u5b57/\u4e0b\u5212\u7ebf\uff0c\u4ee5\u5b57\u6bcd\u5f00\u5934\u3002")
+                .arg(QString::fromStdString(result.error)), false);
+            return;
+        }
+        QSaveFile file(path);
+        if(!file.open(QIODevice::WriteOnly) ||
+            file.write(result.program.data(), static_cast<qint64>(result.program.size())) != static_cast<qint64>(result.program.size()) ||
+            !file.commit()) {
+            showResult(QStringLiteral("FANUC \u6587\u4ef6\u4fdd\u5b58\u5931\u8d25\uff1a%1").arg(file.errorString()), false);
+            return;
+        }
+        showResult(QStringLiteral("\u5df2\u5bfc\u51fa %1 \u4e2a CDF \u6700\u7ec8 TCP \u70b9\uff1a%2\n"
+            "UF2 / UT1 / L / 400mm/sec / CNT100\uff1bCONFIG \u6cbf\u7528 JHA.LS \u6a21\u677f\u3002\n"
+            "\u8bf7\u5728\u53d1\u90a3\u79d1\u4e2d\u6838\u5bf9\u5750\u6807\u7cfb\u3001\u5de5\u5177\u4e0e\u6784\u578b\uff1bL/CNT \u63d2\u8865\u4e0e\u539f CDF \u5173\u8282\u63d2\u503c\u4e0d\u540c\uff0c\u9700\u91cd\u65b0\u9a8c\u8bc1\u63a7\u5236\u5668\u8f68\u8ff9\u3002")
+            .arg(static_cast<qulonglong>(result.pointCount)).arg(path), true);
+    }
+
     void MotionPlanningModuleController::exportJointTrajectory(bool cdfOnly)
     {
         const auto showResult = [this, cdfOnly](const QString& message, bool success) {
@@ -1940,6 +2080,7 @@ namespace robot_qt_viewer
 
     void MotionPlanningModuleController::startJointPlayback(double durationSeconds)
     {
+        if(m_distanceBusy) return;
         if(m_selectedRobotId.isEmpty() || (m_selectedTrajectoryId.isEmpty() && !m_cdfStagePlayback)) {
             m_widget.setResult(QStringLiteral("Select a solved joint trajectory before playback."), false);
             return;
@@ -1981,6 +2122,11 @@ namespace robot_qt_viewer
         // Do not also enable expensive continuous viewport queries as a side effect.
         // Explicit Collision workbench query settings remain owned by that workbench.
         m_playbackPlan = std::make_shared<const motion_planning::StoredMotionPlan>(*selectedPlan);
+        m_distancePlan = m_playbackPlan;
+        m_distanceRuntimePoints.clear();
+        m_distanceRuntimePoints.reserve(selectedPlan->trajectory.points.size());
+        m_distanceRecordedAt = QDateTime::currentDateTime().toString(Qt::ISODate);
+        m_widget.setNearestDistanceAvailable(false);
 
         const std::vector<std::string> collisionDetectorIds =
             playbackCollisionDetectorIds(m_context.document(), m_selectedRobotId);
@@ -2061,6 +2207,7 @@ namespace robot_qt_viewer
         m_multiIkPlayback.reset();
         m_cdfStagePlayback.reset();
         m_playbackPlan.reset();
+        m_widget.setNearestDistanceAvailable(m_playbackCollisionScene && !m_distanceRuntimePoints.empty());
         m_playbackFrameTicket = 0;
     }
 
@@ -2129,6 +2276,7 @@ namespace robot_qt_viewer
             ++m_playbackCollisionSamples;
             if(m_playbackCollisionScene) {
                 const auto runtimeJoints = maybeMapIrb4600JointSigns(m_context.document(), m_selectedRobotId, point.q);
+                m_distanceRuntimePoints.push_back(runtimeJoints);
                 const auto validation = m_playbackCollisionScene->validateState(runtimeJoints);
                 if(!validation.valid) {
                     if(validation.diagnosticCode == "state_in_collision") { ++m_playbackCollisionHits; }
@@ -2349,6 +2497,111 @@ namespace robot_qt_viewer
         m_widget.showSprayMeasurementPlot(distances, angles,
             QStringLiteral("Spray measurements - %1 / %2 (%3 points)")
                 .arg(m_sprayRobotId, m_sprayTrajectoryId).arg(m_spraySamples.size()));
+    }
+
+    void MotionPlanningModuleController::plotNearestDistances()
+    {
+        if(m_distanceBusy || m_playbackPlan || !m_distancePlan || !m_playbackCollisionScene || m_distanceRuntimePoints.empty()) return;
+        m_distanceBusy = true;
+        auto scene = std::move(m_playbackCollisionScene);
+        const auto plan = m_distancePlan;
+        const auto points = m_distanceRuntimePoints;
+        QStringList detectors;
+        for(const auto& id : scene->collisionDetectorIds()) detectors.push_back(QString::fromStdString(id));
+        std::vector<motion_planning::PlanningSceneDistanceSample> samples;
+        std::atomic_bool cancelled{false};
+        std::atomic_int completed{0};
+        QString workerError;
+        CdfProgressDialog progress(&m_widget);
+        progress.setObjectName(QStringLiteral("nearestDistanceProgress"));
+        progress.setWindowTitle(QStringLiteral("\u9010\u70b9\u67e5\u8be2\u6700\u8fd1\u8ddd\u79bb"));
+        auto* layout = new QVBoxLayout(&progress);
+        auto* label = new QLabel(&progress);
+        layout->addWidget(label);
+        auto* cancel = new QPushButton(QStringLiteral("\u53d6\u6d88"), &progress);
+        layout->addWidget(cancel);
+        connect(cancel, &QPushButton::clicked, &progress, [&]() { cancelled.store(true); cancel->setEnabled(false); });
+        QTimer timer;
+        connect(&timer, &QTimer::timeout, &progress, [&]() {
+            label->setText(QStringLiteral("%1 / %2 points\n%3").arg(completed.load()).arg(points.size()).arg(detectors.join(QStringLiteral(", "))));
+        });
+        timer.start(100);
+        auto* worker = QThread::create([&]() {
+            try {
+                samples.reserve(points.size());
+                for(const auto& q : points) {
+                    if(cancelled.load()) break;
+                    samples.push_back(scene->nearestDistance(q));
+                    completed.store(static_cast<int>(samples.size()));
+                }
+            } catch(const std::exception& error) { workerError = QString::fromUtf8(error.what()); }
+            catch(...) { workerError = QStringLiteral("Distance query failed."); }
+        });
+        connect(worker, &QThread::finished, &progress, &QDialog::accept, Qt::QueuedConnection);
+        worker->start();
+        progress.exec();
+        worker->wait();
+        delete worker;
+        timer.stop();
+        m_playbackCollisionScene = std::move(scene);
+        m_distanceBusy = false;
+        if(!workerError.isEmpty()) { m_widget.setResult(workerError, false); return; }
+        if(cancelled.load()) { m_widget.setResult(QStringLiteral("Distance query cancelled; no incomplete report exported."), false); return; }
+
+        QVector<double> distances;
+        QString report;
+        QTextStream text(&report);
+        text.setLocale(QLocale::c());
+        text.setRealNumberNotation(QTextStream::ScientificNotation);
+        text.setRealNumberPrecision(16);
+        const bool complete = samples.size() == plan->trajectory.points.size();
+        text << "# robot=" << QString::fromStdString(plan->robotId) << " trajectory=" << QString::fromStdString(plan->id) << '\n';
+        text << "# playback_snapshot=" << m_distanceRecordedAt << " detectors=" << detectors.join(',') << '\n';
+        text << "# complete=" << (complete ? 1 : 0) << " sampled_points=" << samples.size() << " total_points=" << plan->trajectory.points.size() << '\n';
+        text << "# Nonnegative geometric distance, collision=0 mm (not penetration depth). Invalid=nan. Source points only, not continuous segment certification.\n";
+        text << "# Runtime joints: radians for revolute joints, meters for prismatic joints; source timestamps in seconds.\n";
+        text << "index\ttime_s\tdistance_mm\tvalid\tin_collision\tdetector\tstatus";
+        for(const auto& name : plan->jointNames) text << '\t' << QString::fromStdString(name) << "_runtime";
+        text << '\n';
+        int hits = 0, invalid = 0;
+        for(std::size_t i = 0; i < samples.size(); ++i) {
+            const auto& sample = samples[i];
+            distances.push_back(sample.valid ? sample.distanceMeters * 1000.0 : std::numeric_limits<double>::quiet_NaN());
+            hits += sample.inCollision ? 1 : 0;
+            invalid += sample.valid ? 0 : 1;
+            QString message = QString::fromStdString(sample.message);
+            message.replace('\t', ' ').replace('\r', ' ').replace('\n', ' ');
+            text << i + 1 << '\t' << plan->trajectory.points[i].time << '\t';
+            if(sample.valid) text << sample.distanceMeters * 1000.0;
+            else text << "nan";
+            text << '\t' << (sample.valid ? 1 : 0) << '\t' << (sample.inCollision ? 1 : 0) << '\t'
+                << QString::fromStdString(sample.detectorId) << '\t' << message;
+            for(double q : points[i]) text << '\t' << q;
+            text << '\n';
+        }
+        text.flush();
+        const QString summary = QStringLiteral("%1 / %2\n\u64ad\u653e\u5feb\u7167\uff1a%3\n\u68c0\u6d4b\u5668\uff1a%4\n%5\uff1b%6 / %7 \u70b9\uff0c\u78b0\u649e\u70b9 %8\uff0c\u67e5\u8be2\u65e0\u6548 %9\u3002\n"
+            "\u78b0\u649e\u65f6\u4e3a 0 mm \u51e0\u4f55\u95f4\u8ddd\uff0c\u975e\u7a7f\u900f\u6df1\u5ea6\uff1b\u65e0\u6548\u70b9\u65ad\u7ebf\u3002\u6b64\u56fe\u68c0\u67e5\u6e90\u70b9\uff0c\u4e0d\u4ee3\u8868\u70b9\u95f4\u8fde\u7eed\u65e0\u78b0\u649e\u3002")
+            .arg(QString::fromStdString(plan->robotId), QString::fromStdString(plan->id), m_distanceRecordedAt, detectors.join(QStringLiteral(", ")))
+            .arg(complete ? QStringLiteral("\u5b8c\u6574\u64ad\u653e") : QStringLiteral("\u90e8\u5206\u64ad\u653e"))
+            .arg(samples.size()).arg(plan->trajectory.points.size()).arg(hits).arg(invalid);
+        m_widget.showNearestDistancePlot(distances, summary, report);
+    }
+
+    void MotionPlanningModuleController::exportNearestDistances(const QString& report)
+    {
+        QString path = getSaveFileName(QStringLiteral("motionPlanning.nearestDistances.save"), &m_widget,
+            QStringLiteral("Export nearest distances"), QStringLiteral("trajectory_nearest_distances.txt"),
+            QStringLiteral("Text Files (*.txt);;All Files (*)"));
+        if(path.isEmpty()) return;
+        if(!path.endsWith(QStringLiteral(".txt"), Qt::CaseInsensitive)) path += QStringLiteral(".txt");
+        QSaveFile file(path);
+        const auto bytes = report.toUtf8();
+        if(!file.open(QIODevice::WriteOnly | QIODevice::Text) || file.write(bytes) != bytes.size() || !file.commit()) {
+            m_widget.setResult(QStringLiteral("Distance export failed: %1").arg(file.errorString()), false);
+            return;
+        }
+        emit statusMessageRequested(QStringLiteral("Exported nearest distances: %1").arg(path), 6000);
     }
 
     void MotionPlanningModuleController::refreshTrajectoryView()
