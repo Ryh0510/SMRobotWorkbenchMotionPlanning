@@ -109,6 +109,7 @@ namespace robot_qt_viewer
         void setSelectedRobot(const QString& robotId);
         void ensurePersistentCdfCollisionSetup();
         void refreshTrajectoryView();
+        void refreshTrajectoryOverlay();
         void refreshCdfJointAngleView();
         bool commitMotionPlanUpdate(
             const motion_planning::StoredMotionPlan& plan,
@@ -169,6 +170,7 @@ namespace robot_qt_viewer
         bool m_sprayRangeVisible = false;
         bool m_endEffectorTraceVisible = false;
         bool m_trajectoryPointsVisible = false;
+        bool m_trajectoryOrientationsVisible = false;
         bool m_sprayMeasurementEnabled = true;
         struct SprayMeasurementSample
         {

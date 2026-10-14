@@ -660,7 +660,12 @@ namespace robot_qt_viewer
         connect(&m_widget, &MotionPlanningEditorWidget::trajectoryPointsVisibilityChanged,
             this, [this](bool visible) {
                 m_trajectoryPointsVisible = visible;
-                refreshTrajectoryView();
+                refreshTrajectoryOverlay();
+            });
+        connect(&m_widget, &MotionPlanningEditorWidget::trajectoryOrientationsVisibilityChanged,
+            this, [this](bool visible) {
+                m_trajectoryOrientationsVisible = visible;
+                refreshTrajectoryOverlay();
             });
         connect(&m_widget, &MotionPlanningEditorWidget::exportCdfTrajectoryRequested,
             this, &MotionPlanningModuleController::exportCdfTrajectory);
@@ -990,12 +995,17 @@ namespace robot_qt_viewer
         const auto* selected = findMotionPlan(plans, m_selectedRobotId, m_selectedTrajectoryId);
         if(!selected || selected->cartesianControlPoints.empty()) return;
         auto plan = *selected;
-        QVector<double> translation, rotation;
-        if(!m_widget.editTrajectoryTransform(translation, rotation)) return;
+        MotionPlanningEditorWidget::TrajectoryTransformSettings settings;
+        if(!m_widget.editTrajectoryTransform(settings)) return;
         std::string error;
-        if(!motion_planning::ProjectTrajectoryControlPointEditor::transformCartesianTrajectory(plan,
-            Eigen::Vector3d(translation[0], translation[1], translation[2]),
-            Eigen::Vector3d(rotation[0], rotation[1], rotation[2]), &error)) {
+        using Editor = motion_planning::ProjectTrajectoryControlPointEditor;
+        const bool transformed = settings.localOrientationOnly
+            ? Editor::rotateCartesianTrajectoryLocalAxis(plan,
+                static_cast<motion_planning::CartesianLocalRotationAxis>(settings.localAxis), settings.localAngleDegrees, &error)
+            : Editor::transformCartesianTrajectory(plan,
+                Eigen::Vector3d(settings.translationMm[0], settings.translationMm[1], settings.translationMm[2]),
+                Eigen::Vector3d(settings.worldRotationDegrees[0], settings.worldRotationDegrees[1], settings.worldRotationDegrees[2]), &error);
+        if(!transformed) {
             m_widget.setResult(QString::fromStdString(error), false);
             return;
         }
@@ -1003,7 +1013,9 @@ namespace robot_qt_viewer
             clearGraphCdfSeed();
             m_widget.setTrajectoryPointsVisible(true);
             refreshTrajectoryView();
-            m_widget.setResult(QStringLiteral("Transformed %1 poses. Previous IK results cleared.")
+            m_widget.setResult((settings.localOrientationOnly
+                ? QStringLiteral("Rotated %1 poses around their local axes; positions unchanged. Previous IK results cleared.")
+                : QStringLiteral("Transformed %1 poses. Previous IK results cleared."))
                 .arg(plan.cartesianControlPoints.points.size()), true);
         }
     }
@@ -2704,13 +2716,21 @@ namespace robot_qt_viewer
             emptyPoseText,
             emptyJointText);
 
-        if(IRobotQtViewerMotionPlanningViewportPort* viewportServices = m_context.motionPlanningViewport()) {
-            if(selectedPlan != nullptr && !selectedPlan->cartesianControlPoints.empty()) {
-                viewportServices->setTrajectoryControlPointOverlay(
-                    QString::fromStdString(selectedPlan->id),
-                    cartesianControlPointTransforms(*selectedPlan), m_trajectoryPointsVisible);
+        refreshTrajectoryOverlay();
+    }
+
+    void MotionPlanningModuleController::refreshTrajectoryOverlay()
+    {
+        if(auto* viewport = m_context.motionPlanningViewport()) {
+            const auto plans = motion_planning::MotionPlanningProjectStore::plans(m_context.document());
+            const auto plan = std::find_if(plans.begin(), plans.end(), [this](const auto& item) {
+                return item.id == m_selectedTrajectoryId.toStdString() && item.robotId == m_selectedRobotId.toStdString();
+            });
+            if(plan != plans.end() && !plan->cartesianControlPoints.empty()) {
+                viewport->setTrajectoryControlPointOverlay(QString::fromStdString(plan->id),
+                    cartesianControlPointTransforms(*plan), m_trajectoryPointsVisible, m_trajectoryOrientationsVisible);
             } else {
-                viewportServices->clearTrajectoryControlPointOverlay();
+                viewport->clearTrajectoryControlPointOverlay();
             }
         }
     }

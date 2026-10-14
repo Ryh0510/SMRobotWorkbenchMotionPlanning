@@ -22,6 +22,7 @@
 #include <QSignalBlocker>
 #include <QSpinBox>
 #include <QStyle>
+#include <QStackedWidget>
 #include <QStringList>
 #include <QTableWidget>
 #include <QTableWidgetItem>
@@ -430,6 +431,12 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
         QStringLiteral("\u663e\u793a\u8f68\u8ff9\u70b9"), basicPage);
     m_trajectoryPointsVisible->setObjectName(QStringLiteral("trajectoryPointsVisible"));
     layout->addWidget(m_trajectoryPointsVisible);
+    m_trajectoryOrientationsVisible = new QCheckBox(
+        QStringLiteral("\u663e\u793a\u8f68\u8ff9\u70b9\u59ff\u6001"), basicPage);
+    m_trajectoryOrientationsVisible->setObjectName(QStringLiteral("trajectoryOrientationsVisible"));
+    m_trajectoryOrientationsVisible->setToolTip(QStringLiteral(
+        "\u7ea2/\u7eff/\u84dd\u7ec6\u7ebf\u5206\u522b\u8868\u793a\u8f68\u8ff9\u70b9\u7684\u5c40\u90e8 X/Y/Z \u8f74\uff1b\u8f74\u957f 15~40 mm\u3002"));
+    layout->addWidget(m_trajectoryOrientationsVisible);
 
     auto* ikForm = new QFormLayout();
     ikForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
@@ -940,6 +947,8 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
         this, &MotionPlanningEditorWidget::exportJointTrajectoryRequested);
     connect(m_trajectoryPointsVisible, &QCheckBox::toggled,
         this, &MotionPlanningEditorWidget::trajectoryPointsVisibilityChanged);
+    connect(m_trajectoryOrientationsVisible, &QCheckBox::toggled,
+        this, &MotionPlanningEditorWidget::trajectoryOrientationsVisibilityChanged);
     connect(m_sprayRangeVisible, &QCheckBox::toggled,
         this, &MotionPlanningEditorWidget::sprayRangeVisibilityChanged);
     connect(m_endEffectorTraceVisible, &QCheckBox::toggled,
@@ -1068,35 +1077,74 @@ void MotionPlanningEditorWidget::showSprayMeasurementPlot(
     dialog->show();
 }
 
-bool MotionPlanningEditorWidget::editTrajectoryTransform(QVector<double>& translationMm, QVector<double>& rotationDegrees)
+bool MotionPlanningEditorWidget::editTrajectoryTransform(TrajectoryTransformSettings& settings)
 {
     QDialog dialog(this);
     dialog.setObjectName(QStringLiteral("trajectoryTransformDialog"));
     dialog.setWindowTitle(QStringLiteral("\u53d8\u6362\u8f68\u8ff9"));
     auto* layout = new QFormLayout(&dialog);
-    auto* help = new QLabel(QStringLiteral("\u7ed5\u4e16\u754c\u539f\u70b9\uff0c\u4f9d\u6b21\u7ed5\u56fa\u5b9a X\u3001Y\u3001Z \u8f74\u65cb\u8f6c\uff0c\u518d\u6cbf\u4e16\u754c\u8f74\u5e73\u79fb\u3002\n"
-        "\u4f4d\u7f6e\u4e0e\u59ff\u6001\u540c\u65f6\u53d8\u6362\uff1b\u6bcf\u6b21\u64cd\u4f5c\u7d2f\u8ba1\u4f5c\u7528\u4e8e\u5f53\u524d\u8f68\u8ff9\u3002"), &dialog);
+    auto* mode = new QComboBox(&dialog);
+    mode->setObjectName(QStringLiteral("trajectoryTransformMode"));
+    mode->addItem(QStringLiteral("\u6574\u4f53\u4f4d\u7f6e\u4e0e\u59ff\u6001\uff08\u4e16\u754c\u5750\u6807\uff09"));
+    mode->addItem(QStringLiteral("\u53ea\u65cb\u8f6c\u59ff\u6001\uff08\u5404\u70b9\u5c40\u90e8\u5750\u6807\uff09"));
+    layout->addRow(QStringLiteral("\u53d8\u6362\u65b9\u5f0f"), mode);
+    auto* help = new QLabel(&dialog);
     help->setWordWrap(true);
     layout->addRow(help);
+    auto* pages = new QStackedWidget(&dialog);
+    layout->addRow(pages);
+    auto* worldPage = new QWidget(pages);
+    auto* worldForm = new QFormLayout(worldPage);
     QVector<QDoubleSpinBox*> fields;
     const QStringList labels = {QStringLiteral("X \u5e73\u79fb (mm)"), QStringLiteral("Y \u5e73\u79fb (mm)"),
         QStringLiteral("Z \u5e73\u79fb (mm)"), QStringLiteral("X \u65cb\u8f6c (deg)"), QStringLiteral("Y \u65cb\u8f6c (deg)"), QStringLiteral("Z \u65cb\u8f6c (deg)")};
     for(int i = 0; i < 6; ++i) {
-        auto* field = new QDoubleSpinBox(&dialog);
+        auto* field = new QDoubleSpinBox(worldPage);
         field->setObjectName(QStringLiteral("transformValue%1").arg(i));
         field->setRange(i < 3 ? -1.0e6 : -36000.0, i < 3 ? 1.0e6 : 36000.0);
         field->setDecimals(6);
         field->setSingleStep(1.0);
         fields.push_back(field);
-        layout->addRow(labels[i], field);
+        worldForm->addRow(labels[i], field);
     }
+    pages->addWidget(worldPage);
+    auto* localPage = new QWidget(pages);
+    auto* localForm = new QFormLayout(localPage);
+    auto* axis = new QComboBox(localPage);
+    axis->setObjectName(QStringLiteral("trajectoryLocalRotationAxis"));
+    axis->addItems({QStringLiteral("\u5c40\u90e8 X \u8f74\uff08\u7ea2\u8272\uff09"),
+        QStringLiteral("\u5c40\u90e8 Y \u8f74\uff08\u7eff\u8272\uff09"),
+        QStringLiteral("\u5c40\u90e8 Z \u8f74\uff08\u84dd\u8272\uff09")});
+    axis->setCurrentIndex(2);
+    localForm->addRow(QStringLiteral("\u65cb\u8f6c\u8f74"), axis);
+    auto* angle = new QDoubleSpinBox(localPage);
+    angle->setObjectName(QStringLiteral("trajectoryLocalRotationAngle"));
+    angle->setRange(-36000.0, 36000.0);
+    angle->setDecimals(6);
+    angle->setSingleStep(1.0);
+    angle->setSuffix(QStringLiteral(" deg"));
+    localForm->addRow(QStringLiteral("\u65cb\u8f6c\u89d2\u5ea6"), angle);
+    pages->addWidget(localPage);
+    const auto updateMode = [help, pages](int index) {
+        pages->setCurrentIndex(index);
+        help->setText(index == 0 ? QStringLiteral(
+            "\u7ed5\u4e16\u754c\u539f\u70b9\uff0c\u4f9d\u6b21\u7ed5\u56fa\u5b9a X\u3001Y\u3001Z \u8f74\u65cb\u8f6c\uff0c\u518d\u6cbf\u4e16\u754c\u8f74\u5e73\u79fb\u3002\n"
+            "\u4f4d\u7f6e\u4e0e\u59ff\u6001\u540c\u65f6\u53d8\u6362\uff1b\u6bcf\u6b21\u64cd\u4f5c\u7d2f\u8ba1\u4f5c\u7528\u4e8e\u5f53\u524d\u8f68\u8ff9\u3002") : QStringLiteral(
+            "\u6240\u6709\u8f68\u8ff9\u70b9\u5206\u522b\u7ed5\u81ea\u8eab\u6240\u9009 X/Y/Z \u8f74\u65cb\u8f6c\uff0c\u53ea\u6539\u53d8\u59ff\u6001\uff0c\u4f4d\u7f6e\u4fdd\u6301\u4e0d\u53d8\u3002\n"
+            "\u6b63\u89d2\u5ea6\u9075\u5faa\u53f3\u624b\u5b9a\u5219\uff0c\u8d1f\u89d2\u5ea6\u53cd\u5411\u65cb\u8f6c\uff1b\u6bcf\u6b21\u64cd\u4f5c\u7d2f\u8ba1\u4f5c\u7528\u4e8e\u5f53\u524d\u59ff\u6001\u3002"));
+    };
+    connect(mode, qOverload<int>(&QComboBox::currentIndexChanged), &dialog, updateMode);
+    updateMode(0);
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
     layout->addRow(buttons);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     if(dialog.exec() != QDialog::Accepted) return false;
-    translationMm = {fields[0]->value(), fields[1]->value(), fields[2]->value()};
-    rotationDegrees = {fields[3]->value(), fields[4]->value(), fields[5]->value()};
+    settings.localOrientationOnly = mode->currentIndex() == 1;
+    settings.translationMm = {fields[0]->value(), fields[1]->value(), fields[2]->value()};
+    settings.worldRotationDegrees = {fields[3]->value(), fields[4]->value(), fields[5]->value()};
+    settings.localAxis = axis->currentIndex();
+    settings.localAngleDegrees = angle->value();
     return true;
 }
 

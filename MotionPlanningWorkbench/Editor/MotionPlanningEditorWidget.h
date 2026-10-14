@@ -120,7 +120,15 @@ public:
     void setCdfResult(const QString& summary, bool success);
     CdfQpRepairSettings cdfQpRepairSettings() const;
     bool editControlPointPose(ControlPointPoseEditorData& data, const QString& title);
-    bool editTrajectoryTransform(QVector<double>& translationMm, QVector<double>& rotationDegrees);
+    struct TrajectoryTransformSettings
+    {
+        bool localOrientationOnly = false;
+        QVector<double> translationMm{0, 0, 0};
+        QVector<double> worldRotationDegrees{0, 0, 0};
+        int localAxis = 2;
+        double localAngleDegrees = 0.0;
+    };
+    bool editTrajectoryTransform(TrajectoryTransformSettings& settings);
     void setTrajectoryPointsVisible(bool visible);
     void setNearestDistanceAvailable(bool available);
     void showNearestDistancePlot(const QVector<double>& distancesMm, const QString& summary,
@@ -181,6 +189,7 @@ signals:
     void playbackStopRequested();
     void exportJointTrajectoryRequested();
     void trajectoryPointsVisibilityChanged(bool visible);
+    void trajectoryOrientationsVisibilityChanged(bool visible);
     void sprayRangeVisibilityChanged(bool visible);
     void endEffectorTraceVisibilityChanged(bool visible);
     void sprayMeasurementEnabledChanged(bool enabled);
@@ -239,6 +248,7 @@ private:
     QPushButton* m_solveIkButton = nullptr;
     QPushButton* m_exportJointTrajectoryButton = nullptr;
     QCheckBox* m_trajectoryPointsVisible = nullptr;
+    QCheckBox* m_trajectoryOrientationsVisible = nullptr;
     QPushButton* m_applyJointPointButton = nullptr;
     QDoubleSpinBox* m_playbackDuration = nullptr;
     QPushButton* m_playbackButton = nullptr;
