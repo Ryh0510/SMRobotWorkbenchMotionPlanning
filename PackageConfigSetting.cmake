@@ -17,10 +17,10 @@ set(${PACKAGE_NAME}_Components
     MotionPlanningWorkbench
 )
 
+rs_begin_package_requirements(${PACKAGE_NAME})
 foreach(TARGET_NAME ${${PACKAGE_NAME}_Components})
     include(${CMAKE_CURRENT_LIST_DIR}/${TARGET_NAME}/TargetConfigSetting.cmake)
-    list(APPEND ${PACKAGE_NAME}_RequiredLibsPublic ${${TARGET_NAME}_RequiredLibsPublic})
-    list(APPEND ${PACKAGE_NAME}_RequiredLibsPrivate ${${TARGET_NAME}_RequiredLibsPrivate})
+    rs_collect_component_requirements(${PACKAGE_NAME} ${TARGET_NAME})
     set(${PACKAGE_NAME}${TARGET_NAME}_RequiredLibsPublic ${${TARGET_NAME}_RequiredLibsPublic})
     set(${PACKAGE_NAME}${TARGET_NAME}_RequiredLibsPrivate ${${TARGET_NAME}_RequiredLibsPrivate})
 endforeach()

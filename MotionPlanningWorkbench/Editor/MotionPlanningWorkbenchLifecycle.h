@@ -14,11 +14,13 @@ namespace robot_qt_viewer
     class RobotQtViewerDocumentContext;
     class RobotQtViewerDocumentViewRegistry;
     class MotionPlanningModuleController;
+    class PlanningDataSource;
 
     struct MotionPlanningWorkbenchComposition
     {
         RobotQtViewerDocumentContext* documentContext = nullptr;
         RobotQtViewerDocumentViewRegistry* documentViewRegistry = nullptr;
+        PlanningDataSource* dataSource = nullptr;
         std::function<void(const QString&, int)> showStatus;
     };
 

@@ -4,6 +4,7 @@
 #include "RobotQtViewerViewportPorts.h"
 
 #include <QObject>
+#include <QPointer>
 #include <QElapsedTimer>
 #include <QString>
 #include <QStringList>
@@ -30,6 +31,8 @@ namespace motion_planning
 namespace robot_qt_viewer
 {
     class RobotQtViewerDocumentContext;
+    class PlanningDataSource;
+    struct PlanningDataSnapshot;
 
     class MotionPlanningModuleController : public QObject
     {
@@ -43,6 +46,8 @@ namespace robot_qt_viewer
         ~MotionPlanningModuleController() override;
 
         void handleEvent(const RobotQtViewerEvent& event);
+        void setPlanningDataSource(PlanningDataSource* source);
+        void synchronizePlanningData(const PlanningDataSnapshot& snapshot);
 
     signals:
         void statusMessageRequested(const QString& message, int timeoutMs);
@@ -56,9 +61,15 @@ namespace robot_qt_viewer
             double duration,
             int sampleCount);
         void importTrajectory(bool transformPage = false);
+        void useCurrentTrajectoryForCdf();
+        void setCdfSeedFromPlan(const motion_planning::StoredMotionPlan& plan);
+        void sendCurrentTrajectoryToCoating();
+        bool sendPlanToCoating(const motion_planning::StoredMotionPlan& plan,
+            const std::vector<double>& referenceTimes, QString& error);
         void deleteTransformTrajectory();
         void transformTrajectory();
         void exportTransformTrajectory();
+        void exportTransformRobotProgram(bool fanuc);
         void plotNearestDistances();
         void exportNearestDistances(const QString& report);
         void importCdfJointAngles();
@@ -80,6 +91,7 @@ namespace robot_qt_viewer
         void applySelectedCdfJointAngles(int pointIndex);
         void repairImportedCdfTrajectory();
         void exportCdfTrajectory();
+        void exportCdfTcpTrajectory();
         void exportCdfRapid();
         void exportCdfFanuc();
         void clearCdfAnalysis();
@@ -109,11 +121,13 @@ namespace robot_qt_viewer
         void setSelectedRobot(const QString& robotId);
         void ensurePersistentCdfCollisionSetup();
         void refreshTrajectoryView();
+        std::string m_segmentSourceFingerprint;
+        void segmentTrajectory(double angle, double minimumMm);
         void refreshTrajectoryOverlay();
         void refreshCdfJointAngleView();
         bool commitMotionPlanUpdate(
-            const motion_planning::StoredMotionPlan& plan,
-            const QString& sourceId);
+            motion_planning::StoredMotionPlan plan,
+            const QString& sourceId, int insertedIndex = -1, int removedIndex = -1);
         bool applyJointValuesToRobotRuntime(
             const std::vector<std::string>& jointNames,
             const std::vector<double>& jointValues,
@@ -126,6 +140,10 @@ namespace robot_qt_viewer
 
         MotionPlanningEditorWidget& m_widget;
         RobotQtViewerDocumentContext& m_context;
+        QPointer<PlanningDataSource> m_sharedDataSource;
+        bool m_receivingSharedData = false;
+        bool m_waitingForSharedRobot = false;
+        std::unique_ptr<motion_planning::StoredMotionPlan> m_cdfSeedPlan;
         struct ImportedCdfJointPoint
         {
             double timeSeconds = 0.0;

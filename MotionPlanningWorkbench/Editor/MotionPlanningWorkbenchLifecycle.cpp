@@ -54,6 +54,7 @@ namespace robot_qt_viewer
                     [controller](const RobotQtViewerEvent& event) {
                         controller->handleEvent(event);
                     });
+                controller->setPlanningDataSource(composition.dataSource);
                 auto language = std::make_unique<RobotQtViewerWidgetLanguageParticipant>();
                 language->addRoot(*widget);
                 return std::unique_ptr<RobotQtViewerWorkbenchRuntimeContribution>(

@@ -1,5 +1,10 @@
 #include <map>
 #include "MotionPlanningModuleController.h"
+#include <ProjectMotionPlanning/ZigzagTrajectorySegmentation.h>
+#include <nlohmann/json.hpp>
+#include <QStandardPaths>
+#include <QDateTime>
+#include "PlanningTrajectoryTransfer.h"
 #include "ConfigurationSelectionDialog.h"
 
 #include "MotionPlanningEditorWidget.h"
@@ -15,6 +20,7 @@
 #include <ProjectMotionPlanning/ProjectMotionPlanning.h>
 #include <ProjectMotionPlanning/CdfJointAngleImport.h>
 #include <ProjectMotionPlanning/CdfQpTrajectoryRepair.h>
+#include <ProjectMotionPlanning/GaApfCdfPipeline.h>
 #include <ProjectMotionPlanning/TrajectoryControlPointEditing.h>
 #include <ProjectMotionPlanning/TrajectoryImport.h>
 #include <ProjectMotionPlanning/TrajectoryInverseKinematics.h>
@@ -40,6 +46,7 @@
 #include <QSaveFile>
 #include <QStringList>
 #include <QTimer>
+#include <QScopedValueRollback>
 #include <QThread>
 #include <QTextStream>
 
@@ -116,144 +123,24 @@ namespace
         return names;
     }
 
-    QString defaultCdfPlanningRobotId(
-        const simulation_project::ProjectDocument& document,
-        const QString& selectedRobotId)
+    bool cdfDetectorIsConfigured(const simulation_project::ProjectDocument& document,
+        const std::string& robotId,const motion_planning::ProjectCdfQpRepairOptions& options)
     {
-        const auto exactIt = std::find_if(
-            document.robots.begin(),
-            document.robots.end(),
-            [](const simulation_project::RobotDesc& robot) {
-                return robot.id == "ABB4600_urdf";
-            });
-        if(exactIt != document.robots.end()) {
-            return QString::fromStdString(exactIt->id);
-        }
-
-        const auto sourceIt = std::find_if(
-            document.robots.begin(),
-            document.robots.end(),
-            [](const simulation_project::RobotDesc& robot) {
-                return robot.id.find("4600") != std::string::npos ||
-                    robot.name.find("4600") != std::string::npos ||
-                    robot.sourcePath.find("ABB4600") != std::string::npos;
-            });
-        if(sourceIt != document.robots.end()) {
-            return QString::fromStdString(sourceIt->id);
-        }
-
-        return selectedRobotId;
+        return motion_planning::ProjectCdfQpTrajectoryRepairService::collisionSetupConfigured(document,robotId,options);
     }
 
-    bool detectorTargetsRobot(
-        const simulation_project::CollisionDetectorDesc& detector,
-        const std::string& robotId)
+    motion_planning::ProjectCdfQpRepairOptions robotCollisionOptions(const QString& robot)
     {
-        return std::any_of(
-            detector.targets.begin(),
-            detector.targets.end(),
-            [&](const simulation_project::CollisionDetectorTargetDesc& target) {
-                return target.robotId == robotId;
-            });
-    }
-
-    bool detectorHasCdfPairGenerator(
-        const simulation_project::CollisionDetectorDesc& detector,
-        const std::string& robotId,
-        const std::string& obstacleId)
-    {
-        return std::any_of(
-            detector.pairGenerators.begin(),
-            detector.pairGenerators.end(),
-            [&](const simulation_project::CollisionPairGeneratorDesc& generator) {
-                if(generator.type == "RobotRobot") {
-                    return (generator.robotA == robotId && generator.robotB == obstacleId) ||
-                        (generator.robotA == obstacleId && generator.robotB == robotId);
-                }
-                if(generator.type == "RobotObject") {
-                    return generator.robotId == robotId && generator.objectId == obstacleId;
-                }
-                return false;
-            });
-    }
-
-    bool cdfDetectorIsConfigured(
-        const simulation_project::ProjectDocument& document,
-        const std::string& robotId,
-        const motion_planning::ProjectCdfQpRepairOptions& options)
-    {
-        const auto detectorIt = std::find_if(
-            document.collision.detectors.begin(),
-            document.collision.detectors.end(),
-            [&](const simulation_project::CollisionDetectorDesc& detector) {
-                return detector.id == options.detectorId;
-            });
-        if(detectorIt == document.collision.detectors.end()) {
-            return false;
-        }
-
-        return detectorIt->enabled &&
-            detectorIt->distance &&
-            detectorIt->nearestPoints &&
-            detectorTargetsRobot(*detectorIt, robotId) &&
-            detectorTargetsRobot(*detectorIt, options.obstacleId) &&
-            detectorHasCdfPairGenerator(*detectorIt, robotId, options.obstacleId);
+        motion_planning::ProjectCdfQpRepairOptions options;
+        if(robot != QStringLiteral("ABB4600_urdf"))
+            options.detectorId="cdf_"+robot.toStdString()+"_A";
+        return options;
     }
 
     std::vector<std::string> playbackCollisionDetectorIds(
-        const simulation_project::ProjectDocument& document,
-        const QString& robotId)
+        const simulation_project::ProjectDocument& document,const QString& robotId)
     {
-        const motion_planning::ProjectCdfQpRepairOptions cdfOptions;
-        const std::string robotIdText = robotId.toStdString();
-        if(cdfDetectorIsConfigured(document, robotIdText, cdfOptions)) {
-            return { cdfOptions.detectorId };
-        }
-
-        const auto cdfDetectorIt = std::find_if(
-            document.collision.detectors.begin(),
-            document.collision.detectors.end(),
-            [&](const simulation_project::CollisionDetectorDesc& detector) {
-                return detector.id == cdfOptions.detectorId;
-            });
-        if(cdfDetectorIt != document.collision.detectors.end()) {
-            return {};
-        }
-
-        std::vector<std::string> detectorIds;
-        detectorIds.reserve(document.collision.detectors.size());
-
-        auto detectorUsesRobot = [&](const simulation_project::CollisionDetectorDesc& detector) {
-            for(const simulation_project::CollisionDetectorTargetDesc& target : detector.targets) {
-                if(target.robotId == robotIdText) {
-                    return true;
-                }
-            }
-            for(const simulation_project::CollisionPairGeneratorDesc& generator : detector.pairGenerators) {
-                if(generator.robotId == robotIdText ||
-                    generator.robotA == robotIdText ||
-                    generator.robotB == robotIdText) {
-                    return true;
-                }
-            }
-            return false;
-        };
-
-        for(const simulation_project::CollisionDetectorDesc& detector : document.collision.detectors) {
-            if(detector.enabled && detectorUsesRobot(detector)) {
-                detectorIds.push_back(detector.id);
-            }
-        }
-
-        if(detectorIds.empty()) {
-            for(const simulation_project::CollisionDetectorDesc& detector : document.collision.detectors) {
-                if(detector.enabled) {
-                    detectorIds.push_back(detector.id);
-                }
-            }
-        }
-
-        return detectorIds;
+        return motion_planning::ProjectCdfQpTrajectoryRepairService::distanceDetectorIds(document,robotId.toStdString());
     }
 
     bool usesIrb4600RobotSystemJointSigns(
@@ -495,18 +382,10 @@ namespace
         const motion_planning::ProjectCdfQpRepairResult& result,
         const QString& planId)
     {
-        return QStringLiteral("%1 %2 as %3. min phi: %4 -> %5, iterations=%6, qp_iters=%7, slack=%8, queries=%9")
-            .arg(result.success
-                ? QStringLiteral("Stored repaired APF + CDF/QP trajectory")
-                : QStringLiteral("Stored collision-free APF + CDF/QP trajectory below requested clearance"))
+        return QStringLiteral("Saved GA / APF trajectory: %1 points, %2 accepted stages, id=%3. Sampled collision validation passed.")
             .arg(static_cast<int>(result.plan.trajectory.points.size()))
-            .arg(planId)
-            .arg(formatDouble(result.statistics.initialMinimumPhi))
-            .arg(formatDouble(result.statistics.finalMinimumPhi))
-            .arg(result.statistics.iterations)
-            .arg(result.statistics.qpIterations)
-            .arg(formatDouble(result.statistics.maximumSlack))
-            .arg(result.statistics.collisionQueries);
+            .arg(static_cast<int>(result.stages.size())-1).arg(planId);
+
     }
 
     bool isCdfQpTrajectory(const motion_planning::StoredMotionPlan& plan)
@@ -588,6 +467,8 @@ namespace robot_qt_viewer
         m_playbackTimer->setTimerType(Qt::PreciseTimer);
         connect(&m_widget, &MotionPlanningEditorWidget::planRequested,
             this, &MotionPlanningModuleController::planTrajectory);
+        connect(&m_widget,&MotionPlanningEditorWidget::segmentTrajectoryRequested,this,&MotionPlanningModuleController::segmentTrajectory);
+        connect(&m_widget,&MotionPlanningEditorWidget::segmentSelectionChanged,this,[this](int first,int last) {if(auto* viewport=m_context.motionPlanningViewport()) viewport->setTrajectoryHighlightRange(first,last);});
         connect(&m_widget, &MotionPlanningEditorWidget::importTrajectoryRequested,
             this, [this]() { importTrajectory(); });
         connect(&m_widget, &MotionPlanningEditorWidget::importTransformTrajectoryRequested,
@@ -596,6 +477,10 @@ namespace robot_qt_viewer
             this, &MotionPlanningModuleController::deleteTransformTrajectory);
         connect(&m_widget, &MotionPlanningEditorWidget::transformTrajectoryRequested,
             this, &MotionPlanningModuleController::transformTrajectory);
+        connect(&m_widget, &MotionPlanningEditorWidget::exportTransformRapidRequested,
+            this, [this]() { exportTransformRobotProgram(false); });
+        connect(&m_widget, &MotionPlanningEditorWidget::exportTransformFanucRequested,
+            this, [this]() { exportTransformRobotProgram(true); });
         connect(&m_widget, &MotionPlanningEditorWidget::exportTransformTrajectoryRequested,
             this, &MotionPlanningModuleController::exportTransformTrajectory);
         connect(&m_widget, &MotionPlanningEditorWidget::plotNearestDistancesRequested,
@@ -604,6 +489,10 @@ namespace robot_qt_viewer
             this, &MotionPlanningModuleController::exportNearestDistances);
         connect(&m_widget, &MotionPlanningEditorWidget::importCdfJointAnglesRequested,
             this, &MotionPlanningModuleController::importCdfJointAngles);
+        connect(&m_widget, &MotionPlanningEditorWidget::useCurrentTrajectoryForCdfRequested,
+            this, &MotionPlanningModuleController::useCurrentTrajectoryForCdf);
+        connect(&m_widget, &MotionPlanningEditorWidget::sendTrajectoryToCoatingRequested,
+            this, &MotionPlanningModuleController::sendCurrentTrajectoryToCoating);
         connect(&m_widget, &MotionPlanningEditorWidget::layeredGraphRequested,
             this, &MotionPlanningModuleController::filterLayeredGraph);
         connect(&m_widget, &MotionPlanningEditorWidget::layeredGraphCancelRequested, this, [this]() {
@@ -669,6 +558,8 @@ namespace robot_qt_viewer
             });
         connect(&m_widget, &MotionPlanningEditorWidget::exportCdfTrajectoryRequested,
             this, &MotionPlanningModuleController::exportCdfTrajectory);
+        connect(&m_widget, &MotionPlanningEditorWidget::exportCdfTcpTrajectoryRequested,
+            this, &MotionPlanningModuleController::exportCdfTcpTrajectory);
         connect(&m_widget, &MotionPlanningEditorWidget::exportCdfRapidRequested,
             this, &MotionPlanningModuleController::exportCdfRapid);
         connect(&m_widget, &MotionPlanningEditorWidget::exportCdfFanucRequested,
@@ -720,9 +611,8 @@ namespace robot_qt_viewer
 
     void MotionPlanningModuleController::ensurePersistentCdfCollisionSetup()
     {
-        const motion_planning::ProjectCdfQpRepairOptions options;
-        const QString cdfRobotId =
-            defaultCdfPlanningRobotId(m_context.document(), m_selectedRobotId);
+        const auto options = robotCollisionOptions(m_selectedRobotId);
+        const QString cdfRobotId = m_selectedRobotId;
         if(cdfRobotId.isEmpty()) {
             return;
         }
@@ -750,7 +640,7 @@ namespace robot_qt_viewer
                        &detectorId,
                        &setupDiagnostics)) {
                     error = setupDiagnostics.empty()
-                        ? std::string("Failed to configure persistent ABB4600_urdf-burnner CDF collision detector.")
+                        ? std::string("Failed to configure the robot/A.STL collision detector; the target must exist in the scene.")
                         : setupDiagnostics.front().message;
                     return false;
                 }
@@ -798,7 +688,10 @@ namespace robot_qt_viewer
             invalidateMultiIk();
         }
         if(event.kind == RobotQtViewerEventKind::SelectionChanged) {
-            setSelectedRobot(event.selection.robotId);
+            // Picking a workpiece must not discard the robot receiving its path.
+            if(!event.selection.robotId.isEmpty() || !m_sharedDataSource ||
+                !m_sharedDataSource->snapshot().hasTrajectory())
+                setSelectedRobot(event.selection.robotId);
         } else if(event.kind == RobotQtViewerEventKind::ProjectOpened) {
             clearGraphCdfSeed();
             stopJointPlayback();
@@ -813,6 +706,14 @@ namespace robot_qt_viewer
             clearEndEffectorTrace();
             setEndEffectorTraceVisible(m_endEffectorTraceVisible);
             refreshTrajectoryView();
+            if(m_waitingForSharedRobot) {
+                // Retry after the document transaction and its view updates finish.
+                // A path generated before adding a robot remains in the data source.
+                QTimer::singleShot(0, this, [this]() {
+                    if(m_waitingForSharedRobot && m_sharedDataSource)
+                        synchronizePlanningData(m_sharedDataSource->snapshot());
+                });
+            }
         }
     }
 
@@ -888,6 +789,149 @@ namespace robot_qt_viewer
         m_widget.setResult(summary, true);
         emit trajectoryPlanned(planId);
         emit statusMessageRequested(summary, 4000);
+    }
+
+    void MotionPlanningModuleController::setPlanningDataSource(PlanningDataSource* source)
+    {
+        if(m_sharedDataSource) disconnect(m_sharedDataSource, nullptr, this, nullptr);
+        m_sharedDataSource = source;
+        m_waitingForSharedRobot = false;
+        if(!source) return;
+        connect(source, &PlanningDataSource::snapshotChanged, this,
+            &MotionPlanningModuleController::synchronizePlanningData);
+        synchronizePlanningData(source->snapshot());
+    }
+
+    void MotionPlanningModuleController::synchronizePlanningData(const PlanningDataSnapshot& snapshot)
+    {
+        if(m_receivingSharedData) return;
+        QScopedValueRollback<bool> receiving(m_receivingSharedData, true);
+        m_waitingForSharedRobot = false;
+        if(m_cdfSeedPlan) {
+            PlanningDataSnapshot seedSource;
+            if(PlanningTrajectoryTransfer::decode(m_cdfSeedPlan->processMetadata,seedSource) &&
+                (!snapshot.hasTrajectory() || seedSource.modelObjectId != snapshot.modelObjectId ||
+                    seedSource.revision != snapshot.revision))
+                clearGraphCdfSeed();
+        }
+        if(!snapshot.hasTrajectory()) {
+            m_widget.setTransferStatus(QStringLiteral("等待曲面轨迹生成；已保存的运动轨迹仍可从列表中选择。"));
+            return;
+        }
+        const auto& document = m_context.document();
+        QString robotId = m_selectedRobotId;
+        const auto robotExists = [&](const QString& id) {
+            return std::any_of(document.robots.begin(),document.robots.end(),[&](const auto& r) {
+                // initialJoints contains optional saved pose overrides, not the
+                // robot's joint definition. URDF robots may legitimately omit it.
+                return !id.isEmpty() && r.id == id.toStdString();
+            });
+        };
+        if(!robotExists(robotId)) {
+            const auto robot = std::find_if(document.robots.begin(),document.robots.end(),
+                [](const auto& r) { return !r.id.empty(); });
+            robotId = robot == document.robots.end() ? QString() : QString::fromStdString(robot->id);
+        }
+        if(robotId.isEmpty()) {
+            m_waitingForSharedRobot = true;
+            m_widget.setTransferStatus(QStringLiteral("已收到曲面轨迹，请先添加或选择一个机器人。"));
+            return;
+        }
+        PlanningDataSnapshot world;
+        motion_planning::StoredMotionPlan plan;
+        QString error;
+        if(!planningDataToWorld(snapshot,document,world,&error) ||
+            !PlanningTrajectoryTransfer::makeMotionPlan(world,robotId.toStdString(),
+                selectedRobotJointNames(document,robotId),plan,error)) {
+            m_widget.setTransferStatus(error);
+            emit statusMessageRequested(error,6000);
+            return;
+        }
+        const auto plans = motion_planning::MotionPlanningProjectStore::plans(document);
+        const auto existing = std::find_if(plans.begin(),plans.end(),[&](const auto& p) { return p.id == plan.id; });
+        setSelectedRobot(robotId);
+        // Returning to an existing robot/revision preserves its user edits and IK.
+        if(existing == plans.end()) {
+            if(!commitMotionPlanUpdate(plan,QStringLiteral("motionPlanningSharedImport"))) return;
+        } else m_selectedTrajectoryId = QString::fromStdString(existing->id);
+        refreshTrajectoryView();
+        const QString message = QStringLiteral("已接收曲面轨迹：%1，%2 点 → %3。可继续编辑、逆解、Top-K、CDF 和播放。")
+            .arg(snapshot.modelName).arg(plan.cartesianControlPoints.points.size()).arg(robotId);
+        m_widget.setTransferStatus(message);
+        m_widget.setResult(message,true);
+        emit trajectoryPlanned(m_selectedTrajectoryId);
+        emit statusMessageRequested(message,5000);
+    }
+
+    void MotionPlanningModuleController::setCdfSeedFromPlan(const motion_planning::StoredMotionPlan& plan)
+    {
+        if(plan.trajectory.points.size() < 2) return;
+        m_cdfSeedPlan = std::make_unique<motion_planning::StoredMotionPlan>(plan);
+        m_graphCdfRobotId = QString::fromStdString(plan.robotId);
+        m_cdfSourceName = QString::fromStdString(plan.name);
+        m_cdfJointNames = plan.jointNames;
+        m_cdfJointPoints.clear();
+        for(const auto& p : plan.trajectory.points)
+            m_cdfJointPoints.push_back({p.time,radiansToDegrees(p.q)});
+        clearCdfAnalysis();
+        refreshCdfJointAngleView();
+        m_widget.setCdfExportAvailable(false);
+        m_widget.setCdfResult(QStringLiteral("当前关节轨迹已设为 CDF 初始解：%1 点。")
+            .arg(plan.trajectory.points.size()),true);
+    }
+
+    void MotionPlanningModuleController::useCurrentTrajectoryForCdf()
+    {
+        const auto plans = motion_planning::MotionPlanningProjectStore::plans(m_context.document());
+        const auto* plan = findMotionPlan(plans,m_selectedRobotId,m_selectedTrajectoryId);
+        if(!plan || plan->trajectory.points.size() < 2) {
+            m_widget.setCdfResult(QStringLiteral("请先选择关节轨迹；曲面轨迹需要先求逆解或选择 Top-K 路径。"),false);
+            return;
+        }
+        setCdfSeedFromPlan(*plan);
+    }
+
+    bool MotionPlanningModuleController::sendPlanToCoating(const motion_planning::StoredMotionPlan& plan,
+        const std::vector<double>& referenceTimes, QString& error)
+    {
+        if(!m_sharedDataSource) { error = QStringLiteral("Shared trajectory service is unavailable."); return false; }
+        const auto* services = m_context.motionPlanningViewport();
+        const auto runtimeFk = services
+            ? services->robotForwardKinematics(QString::fromStdString(plan.robotId),plan.jointNames,true)
+            : IRobotQtViewerMotionPlanningViewportPort::RobotForwardKinematics{};
+        const auto document = m_context.document();
+        const auto robot = QString::fromStdString(plan.robotId);
+        PlanningTrajectoryTransfer::ForwardKinematics fk;
+        if(runtimeFk) fk = [runtimeFk,document,robot](const auto& q) {
+            return runtimeFk(maybeMapIrb4600JointSigns(document,robot,q));
+        };
+        PlanningDataSnapshot output;
+        if(!PlanningTrajectoryTransfer::makeAnalysisSnapshot(plan,fk,referenceTimes,output,error)) return false;
+        // Verify the workpiece still exists even when the poses are already world-space.
+        PlanningDataSnapshot checked;
+        if(!planningDataToWorld(output,document,checked,&error)) return false;
+        if(!m_sharedDataSource->publishForAnalysis(std::move(checked))) {
+            error = QStringLiteral("曲面源数据已更新，请使用新轨迹重新规划后再发送。"); return false;
+        }
+        return true;
+    }
+
+    void MotionPlanningModuleController::sendCurrentTrajectoryToCoating()
+    {
+        const auto plans = motion_planning::MotionPlanningProjectStore::plans(m_context.document());
+        const auto* plan = findMotionPlan(plans,m_selectedRobotId,m_selectedTrajectoryId);
+        QString error;
+        if(!plan) error = QStringLiteral("请先选择轨迹。");
+        else if(plan->id.find("_cdf_qp_partial") != std::string::npos)
+            error = QStringLiteral("CDF 尚未通过验收，不能作为优化结果发送到涂层分析。");
+        else if(sendPlanToCoating(*plan,{},error)) {
+            const QString message = QStringLiteral("当前轨迹已发送到涂层分析：%1").arg(QString::fromStdString(plan->name));
+            m_widget.setTransferStatus(message);
+            emit statusMessageRequested(message,5000);
+            return;
+        }
+        m_widget.setTransferStatus(error);
+        emit statusMessageRequested(error,6000);
     }
 
     void MotionPlanningModuleController::importTrajectory(bool transformPage)
@@ -1020,6 +1064,57 @@ namespace robot_qt_viewer
         }
     }
 
+    void MotionPlanningModuleController::exportTransformRobotProgram(bool fanuc)
+    {
+        const auto showResult = [this](const QString& message, bool success) {
+            m_widget.setResult(message, success);
+            emit statusMessageRequested(message, 9000);
+        };
+        // Freeze the selected Cartesian plan before the modal save dialog.
+        const auto plans = motion_planning::MotionPlanningProjectStore::plans(m_context.document());
+        const auto* plan = findMotionPlan(plans, m_selectedRobotId, m_selectedTrajectoryId);
+        if(!plan || plan->cartesianControlPoints.empty()) {
+            showResult(QStringLiteral("\u8bf7\u5148\u5bfc\u5165\u5e76\u9009\u4e2d\u672b\u7aef\u4f4d\u59ff\u8f68\u8ff9\u3002"), false);
+            return;
+        }
+        QString path = getSaveFileName(fanuc ? QStringLiteral("motionPlanning.transformFanuc.save") :
+            QStringLiteral("motionPlanning.transformRapid.save"), &m_widget,
+            fanuc ? QStringLiteral("\u5bfc\u51fa\u8f68\u8ff9\u4e3a\u53d1\u90a3\u79d1\u7a0b\u5e8f") : QStringLiteral("\u5bfc\u51fa\u8f68\u8ff9\u4e3a ABB \u7a0b\u5e8f"),
+            fanuc ? QStringLiteral("JHA.LS") : QStringLiteral("MainModule.mod"),
+            fanuc ? QStringLiteral("FANUC LS Program (*.LS *.ls);;All Files (*)") :
+                QStringLiteral("ABB RAPID Module (*.mod);;All Files (*)"));
+        if(path.isEmpty()) return;
+        const QString suffix = fanuc ? QStringLiteral(".LS") : QStringLiteral(".mod");
+        if(!path.endsWith(suffix, Qt::CaseInsensitive)) path += suffix;
+        std::string program, error;
+        std::size_t count = 0;
+        bool success = false;
+        if(fanuc) {
+            motion_planning::FanucTrajectoryExportOptions options;
+            options.programName = QFileInfo(path).completeBaseName().toUpper().toStdString();
+            const auto result = motion_planning::ProjectFanucTrajectoryExporter::generateCartesian(*plan, options);
+            success = result.success; program = result.program; error = result.error; count = result.pointCount;
+        } else {
+            const auto result = motion_planning::ProjectRapidTrajectoryExporter::generateCartesian(*plan);
+            success = result.success; program = result.program; error = result.error; count = result.pointCount;
+        }
+        if(!success) {
+            showResult(QStringLiteral("Export failed: %1").arg(QString::fromStdString(error)), false);
+            return;
+        }
+        QSaveFile file(path);
+        if(!file.open(QIODevice::WriteOnly) ||
+            file.write(program.data(), static_cast<qint64>(program.size())) != static_cast<qint64>(program.size()) ||
+            !file.commit()) {
+            showResult(QStringLiteral("Export failed: %1").arg(file.errorString()), false);
+            return;
+        }
+        showResult(QStringLiteral("\u5df2\u5bfc\u51fa\u5f53\u524d\u8f68\u8ff9\u7684\u5168\u90e8 %1 \u4e2a\u4f4d\u59ff\uff1a%2\n%3\n\u7a0b\u5e8f\u6cbf\u7528 CDF \u6a21\u677f\u7684\u5de5\u5177\u548c\u5750\u6807\u7cfb\uff1b\u4e0d\u4fdd\u7559\u539f\u59cb\u65f6\u95f4\u6233\u3002").arg(static_cast<qulonglong>(count)).arg(path)
+            .arg(fanuc ? QStringLiteral("UF2 / UT1 / L / 400mm/sec / CNT100") :
+                QStringLiteral("MainModule / MoveL / v50 / z10 / tool0 / wobj0")), true);
+    }
+
+
     void MotionPlanningModuleController::exportTransformTrajectory()
     {
         const auto plans = motion_planning::MotionPlanningProjectStore::plans(m_context.document());
@@ -1074,6 +1169,7 @@ namespace robot_qt_viewer
         }
 
         m_graphCdfRobotId.clear();
+        m_cdfSeedPlan.reset();
         clearCdfAnalysis();
         m_cdfSourceName = QString::fromStdString(importResult.sourceName);
         m_cdfJointNames = importResult.jointNames;
@@ -1224,6 +1320,7 @@ namespace robot_qt_viewer
         m_widget.setResult(summary, true);
         emit trajectoryPlanned(QString::fromStdString(solvedPlan.id));
         emit statusMessageRequested(summary, 5000);
+        setCdfSeedFromPlan(solvedPlan);
     }
 
     void MotionPlanningModuleController::applySelectedJointPoint(int pointIndex)
@@ -1309,11 +1406,15 @@ namespace robot_qt_viewer
     void MotionPlanningModuleController::repairImportedCdfTrajectory()
     {
         if(m_selectedRobotId.isEmpty()) {
-            m_widget.setCdfResult(QStringLiteral("Select ABB4600_urdf before running CDF/QP repair."), false);
+            m_widget.setCdfResult(QStringLiteral("Select a robot before running GA / APF / CDF."), false);
             return;
         }
-        if(m_cdfJointPoints.size() < 2) {
-            m_widget.setCdfResult(QStringLiteral("Import at least two CDF joint angle rows before repair."), false);
+        const auto availablePlans=motion_planning::MotionPlanningProjectStore::plans(m_context.document());
+        const auto* selectedSource=findMotionPlan(availablePlans,m_selectedRobotId,m_selectedTrajectoryId);
+        const bool cartesianInput=m_cdfJointPoints.size()<2 && selectedSource &&
+            selectedSource->cartesianControlPoints.points.size()>=2;
+        if(m_cdfJointPoints.size()<2 && !cartesianInput) {
+            m_widget.setCdfResult(QStringLiteral("Import a Cartesian trajectory or at least two joint rows before GA / APF."),false);
             return;
         }
 
@@ -1356,13 +1457,28 @@ namespace robot_qt_viewer
 
         const MotionPlanningEditorWidget::CdfQpRepairSettings settings =
             m_widget.cdfQpRepairSettings();
-        motion_planning::ProjectCdfQpRepairOptions options;
+        auto options=robotCollisionOptions(m_selectedRobotId);
         options.apfMaxTcpDeviation = settings.apfMaxTcpDeviation;
-        if(!m_graphCdfRobotId.isEmpty() && m_multiIkResult &&
-            m_multiIkResult->source.cartesianControlPoints.points.size()==seedTrajectory.points.size()) {
-            for(const auto& point:m_multiIkResult->source.cartesianControlPoints.points)
+        const auto processSeed = cartesianInput ? *selectedSource :
+            m_cdfSeedPlan ? *m_cdfSeedPlan : motion_planning::StoredMotionPlan{};
+        if(m_cdfSeedPlan && processSeed.cartesianControlPoints.points.size()==seedTrajectory.points.size()) {
+            for(const auto& point:processSeed.cartesianControlPoints.points)
                 options.cartesianTargets.push_back(point.tcpPose);
             options.allowEquivalentEndpointConfigurations = settings.allowEquivalentConfigurations;
+        }
+        PlanningDataSnapshot sourceProcess;
+        const bool linkedProcess = PlanningTrajectoryTransfer::decode(processSeed.processMetadata,sourceProcess);
+        if(linkedProcess) {
+            const auto& objects = m_context.document().objects;
+            if(std::none_of(objects.begin(),objects.end(),[&](const auto& object) {
+                return object.id == sourceProcess.modelObjectId.toStdString();
+            })) {
+                m_widget.setCdfResult(QStringLiteral("源工件已移除，请重新生成轨迹。"),false);
+                return;
+            }
+            options.obstacleId = sourceProcess.modelObjectId.toStdString();
+            options.obstacleName = sourceProcess.modelName.toStdString();
+            options.detectorId = "cdf_shared_" + m_selectedRobotId.toStdString() + "_" + options.obstacleId;
         }
         options.safetyMargin = settings.safetyMargin;
         options.targetClearance = settings.targetClearance;
@@ -1383,9 +1499,23 @@ namespace robot_qt_viewer
             options.worldForwardKinematics = services->robotForwardKinematics(m_selectedRobotId, robotJointNames, true);
 
         const std::string robotId = m_selectedRobotId.toStdString();
+        if(!cdfDetectorIsConfigured(m_context.document(),robotId,options)) {
+            const auto setup = m_context.documentController().mutateProject(
+                QStringLiteral("motionPlanningPersistentCdfCollisionSetup"),ProjectDirtyPolicy::UserEdit,
+                [&](simulation_project::ProjectDocumentService& service,bool& changed,std::string& error) {
+                    std::vector<motion_planning::MotionPlanningDiagnostic> diagnostics;
+                    if(!motion_planning::ProjectCdfQpTrajectoryRepairService::ensureCollisionSetup(
+                        service.document(),robotId,options,nullptr,&diagnostics)) {
+                        error = diagnostics.empty() ? "Cannot configure source-workpiece collisions." : diagnostics.front().message;
+                        return false;
+                    }
+                    changed = true; return true;
+                });
+            if(!setup.success) { m_widget.setCdfResult(setup.message,false); return; }
+        }
         if(!cdfDetectorIsConfigured(m_context.document(), robotId, options)) {
             const QString message = QStringLiteral(
-                "CDF/QP collision detector is not configured. Reopen the project or select ABB4600_urdf to initialize cdf_abb4600_burnner_detector.");
+                "Robot/workpiece collision detector is not configured. Add the intended workpiece and enable collision queries.");
             m_widget.setCdfResult(message, false);
             emit statusMessageRequested(message, 7000);
             return;
@@ -1407,7 +1537,7 @@ namespace robot_qt_viewer
             .arg(QCoreApplication::applicationPid());
         CdfProgressDialog dialog(&m_widget);
         dialog.setObjectName(QStringLiteral("cdfRepairProgress"));
-        dialog.setWindowTitle(QStringLiteral("APF + CDF/QP"));
+        dialog.setWindowTitle(QStringLiteral("GA -> APF -> optional CDF"));
         dialog.setWindowFlags(dialog.windowFlags() & ~Qt::WindowCloseButtonHint);
         dialog.setWindowModality(Qt::ApplicationModal);
         auto* layout = new QVBoxLayout(&dialog);
@@ -1453,6 +1583,11 @@ namespace robot_qt_viewer
 #else
         const QString buildMode = QStringLiteral("Debug");
 #endif
+        std::atomic_bool cancelRequested{false};
+        auto* cancelPipeline=new QPushButton(QStringLiteral("Cancel"),&dialog);
+        layout->addWidget(cancelPipeline);
+        connect(cancelPipeline,&QPushButton::clicked,&dialog,[&]() {cancelRequested.store(true);cancelPipeline->setEnabled(false);});
+        options.cancelled=[&]() {return cancelRequested.load();};
         std::unique_ptr<QThread> worker(QThread::create([&, options]() mutable {
             QFile log(logPath);
             const bool logOpened = log.open(QIODevice::WriteOnly | QIODevice::Text);
@@ -1488,8 +1623,14 @@ namespace robot_qt_viewer
                 .arg(options.apfMaxTcpDeviation * 1000.0));
             options.progress = [&](const std::string& message) { report(QString::fromStdString(message)); };
             try {
-                repairResult = motion_planning::ProjectCdfQpTrajectoryRepairService().repair(
-                    document, basePath, robotId, robotJointNames, seedTrajectory, options);
+                motion_planning::ExternalTrajectoryEvaluationRequest request;
+                request.plan=processSeed;
+                request.plan.robotId=robotId;request.plan.jointNames=robotJointNames;
+                request.plan.trajectory=seedTrajectory;
+                request.collisionDetectorIds=playbackCollisionDetectorIds(document,QString::fromStdString(robotId));
+                request.cdfOptions=options;request.progress=options.progress;request.cancelled=options.cancelled;
+                motion_planning::GaSurfaceSearchOptions surface;surface.sprayDistance=settings.gaSprayDistance;
+                repairResult=motion_planning::runGaApfCdfPipeline(document,basePath,request,settings.useCdf,surface);
                 for(const auto& diagnostic : repairResult.diagnostics) {
                     report(QString::fromStdString(diagnostic.code + ": " + diagnostic.message));
                 }
@@ -1519,14 +1660,11 @@ namespace robot_qt_viewer
         }
 
         m_cdfAnalysis = std::make_unique<motion_planning::ProjectCdfQpRepairResult>(repairResult);
-        QStringList stageNames{QStringLiteral("\u8f93\u5165\uff08\u52a0\u5bc6\u53c2\u8003\uff09"), QStringLiteral("APF \u907f\u969c\u7ed3\u679c\uff08QP \u524d\uff09"), QStringLiteral("CDF/QP \u6700\u7ec8\u7ed3\u679c")};
-        while(stageNames.size() > static_cast<int>(repairResult.stages.size())) stageNames.removeLast();
-        for(int i=1;i<stageNames.size();++i)
-            if(repairResult.stages[i].invalidSegments != 0 || !repairResult.stages[i].tcpCorridorValid)
-                stageNames[i] += QStringLiteral("\uff08\u672a\u901a\u8fc7\u9a8c\u6536\uff0c\u4ec5\u4f9b\u8bca\u65ad\uff09");
+        QStringList stageNames;
+        for(const auto& stage:repairResult.stages)stageNames << QString::fromStdString(stage.name);
         m_widget.setCdfAnalysisStages(stageNames);
         showCdfStage(stageNames.size() - 1);
-        if(repairResult.plan.trajectory.empty()) {
+        if(!repairResult.success || repairResult.plan.trajectory.empty()) {
             const QString message = repairResult.diagnostics.empty()
                 ? QStringLiteral("APF + CDF/QP repair failed before producing a trajectory.")
                 : QString::fromStdString(repairResult.diagnostics.back().message);
@@ -1536,15 +1674,38 @@ namespace robot_qt_viewer
         }
 
         motion_planning::StoredMotionPlan storedPlan = repairResult.plan;
-        if(!repairResult.success) {
-            storedPlan.id = robotId + "_cdf_qp_partial";
-            storedPlan.name = "APF + CDF/QP trajectory (clearance not reached)";
-            storedPlan.trajectory.name = storedPlan.id;
-        }
         for(robottrajectory::TimedJointPoint& point : storedPlan.trajectory.points) {
             point.q = maybeMapIrb4600JointSigns(m_context.document(), m_selectedRobotId, point.q);
             if(!point.qd.empty()) point.qd = maybeMapIrb4600JointSigns(m_context.document(), m_selectedRobotId, point.qd);
             if(!point.qdd.empty()) point.qdd = maybeMapIrb4600JointSigns(m_context.document(), m_selectedRobotId, point.qdd);
+        }
+
+        PlanningDataSnapshot optimizedProcess;
+        QString transferError;
+        bool hasOptimizedProcess = false;
+        if(repairResult.success && linkedProcess) {
+            storedPlan.processMetadata = processSeed.processMetadata;
+            std::vector<double> referenceTimes=repairResult.sourceReferenceTimes;
+            if(referenceTimes.empty() && !repairResult.stages.empty()) {
+                for(const auto& point : repairResult.stages.front().plan.trajectory.points)
+                    referenceTimes.push_back(point.time);
+            }
+            auto* services = m_context.motionPlanningViewport();
+            const auto runtimeFk = services ? services->robotForwardKinematics(m_selectedRobotId,storedPlan.jointNames,true)
+                : IRobotQtViewerMotionPlanningViewportPort::RobotForwardKinematics{};
+            PlanningTrajectoryTransfer::ForwardKinematics fk;
+            if(runtimeFk) fk = [runtimeFk,document,robot= m_selectedRobotId](const auto& q) {
+                return runtimeFk(maybeMapIrb4600JointSigns(document,robot,q));
+            };
+            if(referenceTimes.size() != storedPlan.trajectory.points.size()) {
+                transferError = QStringLiteral("CDF 工艺参考点对应关系不完整，保留原涂层分析输入。");
+            } else hasOptimizedProcess = PlanningTrajectoryTransfer::makeAnalysisSnapshot(
+                storedPlan,fk,referenceTimes,optimizedProcess,transferError);
+            if(hasOptimizedProcess) {
+                optimizedProcess.producer = QStringLiteral("CDF");
+                storedPlan.processMetadata = PlanningTrajectoryTransfer::encode(optimizedProcess);
+                storedPlan.cartesianControlPoints = optimizedProcess.trajectory.baseCartesianTrajectory;
+            } else storedPlan.processMetadata.clear();
         }
 
         if(!commitMotionPlanUpdate(storedPlan, QStringLiteral("motionPlanningCdfQpRepair"))) {
@@ -1559,12 +1720,23 @@ namespace robot_qt_viewer
         refreshTrajectoryView();
 
         const QString planId = QString::fromStdString(storedPlan.id);
+        QString transferSummary;
+        if(hasOptimizedProcess && m_sharedDataSource) {
+            if(m_sharedDataSource->publishForAnalysis(std::move(optimizedProcess))) {
+                transferSummary = QStringLiteral(" | CDF 优化结果已同步到涂层分析。");
+                m_widget.setTransferStatus(transferSummary.mid(3));
+            } else transferError = QStringLiteral("源曲面轨迹版本已更新，未覆盖涂层分析输入。");
+        }
+        if(!transferError.isEmpty()) {
+            transferSummary = QStringLiteral(" | 涂层同步：%1").arg(transferError);
+            m_widget.setTransferStatus(transferError);
+        }
         const QString diagnosticText = repairResult.success
             ? QString()
             : QStringLiteral(" %1").arg(repairResult.diagnostics.empty()
                 ? QStringLiteral("The repaired path still violates the requested clearance.")
                 : QString::fromStdString(repairResult.diagnostics.back().message));
-        const QString summary = cdfRepairSummary(repairResult, planId) + diagnosticText + timingSummary;
+        const QString summary = cdfRepairSummary(repairResult, planId) + diagnosticText + timingSummary + transferSummary;
         m_widget.setCdfResult(summary, repairResult.success);
         emit trajectoryPlanned(planId);
         emit statusMessageRequested(summary, repairResult.success ? 6000 : 9000);
@@ -1705,6 +1877,47 @@ namespace robot_qt_viewer
     void MotionPlanningModuleController::exportCdfTrajectory()
     {
         exportJointTrajectory(true);
+    }
+
+    void MotionPlanningModuleController::exportCdfTcpTrajectory()
+    {
+        const auto showResult = [this](const QString& message, bool success) {
+            m_widget.setCdfResult(message, success);
+            emit statusMessageRequested(message, 9000);
+        };
+        // Capture the full stored result and actual TCP before opening a modal dialog.
+        const auto document = m_context.document();
+        const auto plans = motion_planning::MotionPlanningProjectStore::plans(document);
+        const auto* plan = findMotionPlan(plans, m_selectedRobotId, m_selectedTrajectoryId);
+        if(!plan || !isCdfQpTrajectory(*plan)) {
+            showResult(QStringLiteral("Select the final CDF/QP trajectory before exporting TCP poses."), false);
+            return;
+        }
+        auto* viewport = m_context.motionPlanningViewport();
+        const auto fk = viewport ? viewport->robotForwardKinematics(m_selectedRobotId, plan->jointNames, true)
+            : std::function<Eigen::Isometry3d(const std::vector<double>&)>{};
+        std::string output, error;
+        if(!motion_planning::ProjectTrajectoryControlPointEditor::serializeJointTcpMatrices(
+            *plan, fk, usesIrb4600RobotSystemJointSigns(document, m_selectedRobotId), output, &error)) {
+            showResult(QStringLiteral("TCP trajectory export failed: %1").arg(QString::fromStdString(error)), false);
+            return;
+        }
+        QString path = getSaveFileName(QStringLiteral("motionPlanning.cdfTcpTrajectory.save"), &m_widget,
+            QStringLiteral("Export final CDF/QP TCP trajectory"),
+            QDir(QStandardPaths::writableLocation(QStandardPaths::DesktopLocation)).filePath(
+                QStringLiteral("11111_cdf_qp_tcp.txt")),
+            QStringLiteral("Text Files (*.txt);;All Files (*)"));
+        if(path.isEmpty()) return;
+        if(!path.endsWith(QStringLiteral(".txt"), Qt::CaseInsensitive)) path += QStringLiteral(".txt");
+        QSaveFile file(path);
+        if(!file.open(QIODevice::WriteOnly | QIODevice::Text) ||
+            file.write(output.data(), static_cast<qint64>(output.size())) != static_cast<qint64>(output.size()) || !file.commit()) {
+            showResult(QStringLiteral("TCP trajectory save failed: %1").arg(file.errorString()), false);
+            return;
+        }
+        showResult(QStringLiteral("Exported all %1 final CDF/QP TCP poses: %2\n"
+            "11111.txt format: 4x4 world TCP matrix (mm), recorded time (s), blank separator.")
+            .arg(static_cast<qulonglong>(plan->trajectory.points.size())).arg(path), true);
     }
 
     void MotionPlanningModuleController::exportCdfRapid()
@@ -1926,7 +2139,7 @@ namespace robot_qt_viewer
             return;
         }
 
-        if(commitMotionPlanUpdate(updatedPlan, QStringLiteral("motionPlanningInsertControlPoint"))) {
+        if(commitMotionPlanUpdate(updatedPlan, QStringLiteral("motionPlanningInsertControlPoint"), pointIndex)) {
             refreshTrajectoryView();
             const QString summary = QStringLiteral("Inserted control point before %1")
                 .arg(pointIndex + 1);
@@ -1987,7 +2200,7 @@ namespace robot_qt_viewer
             return;
         }
 
-        if(commitMotionPlanUpdate(updatedPlan, QStringLiteral("motionPlanningInsertControlPoint"))) {
+        if(commitMotionPlanUpdate(updatedPlan, QStringLiteral("motionPlanningInsertControlPoint"), pointIndex + 1)) {
             refreshTrajectoryView();
             const QString summary = QStringLiteral("Inserted control point after %1")
                 .arg(pointIndex + 1);
@@ -2024,7 +2237,7 @@ namespace robot_qt_viewer
             return;
         }
 
-        if(commitMotionPlanUpdate(updatedPlan, QStringLiteral("motionPlanningDeleteControlPoint"))) {
+        if(commitMotionPlanUpdate(updatedPlan, QStringLiteral("motionPlanningDeleteControlPoint"), -1, pointIndex)) {
             refreshTrajectoryView();
             const QString summary = QStringLiteral("Deleted control point %1")
                 .arg(pointIndex + 1);
@@ -2097,9 +2310,7 @@ namespace robot_qt_viewer
             m_widget.setResult(QStringLiteral("Select a solved joint trajectory before playback."), false);
             return;
         }
-        // Multi-IK playback is an unplanned debug sequence. Do not synchronously
-        // build/enable a full collision scene merely to inspect configurations.
-        if(!m_multiIkPlayback) { ensurePersistentCdfCollisionSetup(); }
+        ensurePersistentCdfCollisionSetup();
 
         const std::vector<motion_planning::StoredMotionPlan> plans =
             motion_planning::MotionPlanningProjectStore::plans(m_context.document());
@@ -2142,7 +2353,7 @@ namespace robot_qt_viewer
 
         const std::vector<std::string> collisionDetectorIds =
             playbackCollisionDetectorIds(m_context.document(), m_selectedRobotId);
-        if(!m_multiIkPlayback && !collisionDetectorIds.empty()) {
+        if(!collisionDetectorIds.empty()) {
             motion_planning::ProjectPlanningRequest validationRequest;
             validationRequest.robotId = selectedPlan->robotId;
             validationRequest.jointNames = selectedPlan->jointNames;
@@ -2241,7 +2452,7 @@ namespace robot_qt_viewer
         // Never overwrite a display pose that has not been presented yet. Discard
         // time spent waiting instead of catching up after slow/hidden frames.
         const double delta = m_playbackPointIndex == 0 ? 0.0 :
-            std::min(1.0 / 60.0, static_cast<double>(nowNs - m_playbackLastTickNs) * 1e-9);
+            std::min(0.1, static_cast<double>(nowNs - m_playbackLastTickNs) * 1e-9);
         m_playbackLastTickNs = nowNs;
         auto* services = m_context.motionPlanningViewport();
         if(services && m_playbackFrameTicket != 0 &&
@@ -2331,7 +2542,8 @@ namespace robot_qt_viewer
 
     void MotionPlanningModuleController::setSelectedRobot(const QString& robotId)
     {
-        if(m_selectedRobotId != robotId) {
+        const bool robotChanged = m_selectedRobotId != robotId;
+        if(robotChanged) {
             clearCdfAnalysis();
             clearGraphCdfSeed();
             invalidateMultiIk();
@@ -2354,18 +2566,30 @@ namespace robot_qt_viewer
             [&](const simulation_project::RobotDesc& robot) {
                 return robot.id == robotId.toStdString();
             });
-        if(robotIt == document.robots.end() || robotIt->initialJoints.empty()) {
+        if(robotIt == document.robots.end()) {
             refreshTrajectoryView();
             return;
         }
         QStringList names;
         QStringList values;
-        for(const simulation_project::JointValueDesc& joint : robotIt->initialJoints) {
-            names.push_back(QString::fromStdString(joint.jointName));
-            values.push_back(QString::number(joint.value, 'g', 12));
+        for(const auto& jointName : selectedRobotJointNames(document, robotId)) {
+            names.push_back(QString::fromStdString(jointName));
+            const auto saved = std::find_if(robotIt->initialJoints.begin(), robotIt->initialJoints.end(),
+                [&](const auto& joint) { return joint.jointName == jointName; });
+            double value = saved != robotIt->initialJoints.end() ? saved->value : 0.0;
+            if(saved == robotIt->initialJoints.end()) {
+                if(auto* services = m_context.motionPlanningViewport()) {
+                    bool ok = false;
+                    const double current = services->robotJointValue(robotId, QString::fromStdString(jointName), &ok);
+                    if(ok) value = current;
+                }
+            }
+            values.push_back(QString::number(value, 'g', 12));
         }
         m_widget.setJointDefaults(names.join(QStringLiteral(", ")), values.join(QStringLiteral(", ")));
         refreshTrajectoryView();
+        if(robotChanged && m_sharedDataSource && !m_receivingSharedData && m_sharedDataSource->snapshot().hasTrajectory())
+            synchronizePlanningData(m_sharedDataSource->snapshot());
     }
 
     void MotionPlanningModuleController::setSprayRangeVisible(bool visible)
@@ -2468,7 +2692,7 @@ namespace robot_qt_viewer
         text.setLocale(QLocale::c());
         text.setRealNumberNotation(QTextStream::ScientificNotation);
         text.setRealNumberPrecision(10);
-        text << "# robot=" << m_sprayRobotId << " trajectory=" << m_sprayTrajectoryId << " target=burnner\n";
+        text << "# robot=" << m_sprayRobotId << " trajectory=" << m_sprayTrajectoryId << " target=A.STL\n";
         text << "# playback_complete=" << (m_playbackFinishedNaturally ? 1 : 0) << '\n';
         text << "# Angle: 0=normal incidence; +/-90=grazing. STL normal n faces nozzle; sign=(n cross ray) dot nozzle_local_X.\n";
         text << "# time_s is source trajectory time. Joint values are radians (prismatic: meters).\n";
@@ -2507,13 +2731,38 @@ namespace robot_qt_viewer
                 : std::numeric_limits<double>::quiet_NaN());
         }
         m_widget.showSprayMeasurementPlot(distances, angles,
-            QStringLiteral("Spray measurements - %1 / %2 (%3 points)")
+            QStringLiteral("Spray measurements to A.STL - %1 / %2 (%3 points)")
                 .arg(m_sprayRobotId, m_sprayTrajectoryId).arg(m_spraySamples.size()));
     }
 
     void MotionPlanningModuleController::plotNearestDistances()
     {
-        if(m_distanceBusy || m_playbackPlan || !m_distancePlan || !m_playbackCollisionScene || m_distanceRuntimePoints.empty()) return;
+        if(m_distanceBusy || m_playbackPlan)return;
+        ensurePersistentCdfCollisionSetup();
+        const auto plans=motion_planning::MotionPlanningProjectStore::plans(m_context.document());
+        const auto* selected=m_cdfStagePlayback?m_cdfStagePlayback.get():
+            m_multiIkPlayback?m_multiIkPlayback.get():findMotionPlan(plans,m_selectedRobotId,m_selectedTrajectoryId);
+        if(selected) {
+            if(selected->trajectory.empty()) {m_widget.setResult(QStringLiteral("Solve the selected Cartesian trajectory before querying joint distances."),false);return;}
+            m_distancePlan=std::make_shared<const motion_planning::StoredMotionPlan>(*selected);
+        }
+        if(!m_distancePlan || m_distancePlan->robotId!=m_selectedRobotId.toStdString()) {
+            m_widget.setResult(QStringLiteral("Select a solved joint trajectory before querying distances."),false);return;
+        }
+        motion_planning::ProjectPlanningRequest query;
+        query.robotId=m_distancePlan->robotId;query.jointNames=m_distancePlan->jointNames;
+        query.collisionDetectorIds=playbackCollisionDetectorIds(m_context.document(),m_selectedRobotId);
+        if(query.collisionDetectorIds.empty()) {
+            m_widget.setResult(QStringLiteral("No enabled distance detector for the selected robot/workpiece."),false);return;
+        }
+        std::string queryError;
+        m_playbackCollisionScene=motion_planning::ProjectPlanningSceneBuilder::build(
+            m_context.document(),projectBasePath(m_context.projectSession()),query,&queryError);
+        if(!m_playbackCollisionScene) {m_widget.setResult(QString::fromStdString(queryError),false);return;}
+        m_distanceRuntimePoints.clear();
+        for(const auto& point:m_distancePlan->trajectory.points)m_distanceRuntimePoints.push_back(
+            maybeMapIrb4600JointSigns(m_context.document(),m_selectedRobotId,point.q));
+        m_distanceRecordedAt=QDateTime::currentDateTime().toString(Qt::ISODate);
         m_distanceBusy = true;
         auto scene = std::move(m_playbackCollisionScene);
         const auto plan = m_distancePlan;
@@ -2568,7 +2817,7 @@ namespace robot_qt_viewer
         text.setRealNumberPrecision(16);
         const bool complete = samples.size() == plan->trajectory.points.size();
         text << "# robot=" << QString::fromStdString(plan->robotId) << " trajectory=" << QString::fromStdString(plan->id) << '\n';
-        text << "# playback_snapshot=" << m_distanceRecordedAt << " detectors=" << detectors.join(',') << '\n';
+        text << "# target=A.STL\n# playback_snapshot=" << m_distanceRecordedAt << " detectors=" << detectors.join(',') << '\n';
         text << "# complete=" << (complete ? 1 : 0) << " sampled_points=" << samples.size() << " total_points=" << plan->trajectory.points.size() << '\n';
         text << "# Nonnegative geometric distance, collision=0 mm (not penetration depth). Invalid=nan. Source points only, not continuous segment certification.\n";
         text << "# Runtime joints: radians for revolute joints, meters for prismatic joints; source timestamps in seconds.\n";
@@ -2592,10 +2841,10 @@ namespace robot_qt_viewer
             text << '\n';
         }
         text.flush();
-        const QString summary = QStringLiteral("%1 / %2\n\u64ad\u653e\u5feb\u7167\uff1a%3\n\u68c0\u6d4b\u5668\uff1a%4\n%5\uff1b%6 / %7 \u70b9\uff0c\u78b0\u649e\u70b9 %8\uff0c\u67e5\u8be2\u65e0\u6548 %9\u3002\n"
+        const QString summary = QStringLiteral("%1 / %2\n\u67e5\u8be2\u5feb\u7167\uff1a%3\n\u68c0\u6d4b\u5668\uff1a%4\n%5\uff1b%6 / %7 \u70b9\uff0c\u78b0\u649e\u70b9 %8\uff0c\u67e5\u8be2\u65e0\u6548 %9\u3002\n"
             "\u78b0\u649e\u65f6\u4e3a 0 mm \u51e0\u4f55\u95f4\u8ddd\uff0c\u975e\u7a7f\u900f\u6df1\u5ea6\uff1b\u65e0\u6548\u70b9\u65ad\u7ebf\u3002\u6b64\u56fe\u68c0\u67e5\u6e90\u70b9\uff0c\u4e0d\u4ee3\u8868\u70b9\u95f4\u8fde\u7eed\u65e0\u78b0\u649e\u3002")
             .arg(QString::fromStdString(plan->robotId), QString::fromStdString(plan->id), m_distanceRecordedAt, detectors.join(QStringLiteral(", ")))
-            .arg(complete ? QStringLiteral("\u5b8c\u6574\u64ad\u653e") : QStringLiteral("\u90e8\u5206\u64ad\u653e"))
+            .arg(complete ? QStringLiteral("\u5b8c\u6574\u67e5\u8be2") : QStringLiteral("\u90e8\u5206\u67e5\u8be2"))
             .arg(samples.size()).arg(plan->trajectory.points.size()).arg(hits).arg(invalid);
         m_widget.showNearestDistancePlot(distances, summary, report);
     }
@@ -2719,13 +2968,49 @@ namespace robot_qt_viewer
         refreshTrajectoryOverlay();
     }
 
+    static std::string scanSourceFingerprint(const motion_planning::StoredMotionPlan& plan) {
+        nlohmann::json source={{"id",plan.id},{"robot",plan.robotId},{"points",nlohmann::json::array()}};
+        for(const auto& p:plan.cartesianControlPoints.points) {
+            nlohmann::json values={p.time};for(int row=0;row<3;++row)for(int col=0;col<4;++col)values.push_back(p.tcpPose.matrix()(row,col));source["points"].push_back(values);
+        }
+        return source.dump();
+    }
+    void MotionPlanningModuleController::segmentTrajectory(double angle,double minimumMm)
+    {
+        try {
+            const auto plans=motion_planning::MotionPlanningProjectStore::plans(m_context.document());
+            const auto* plan=findMotionPlan(plans,m_selectedRobotId,m_selectedTrajectoryId);
+            if(!plan || plan->cartesianControlPoints.points.size()<2) throw std::runtime_error("请先选择至少含两个笛卡尔点的轨迹");
+            nlohmann::json source={{"frame","world"},{"name",plan->name},{"points",nlohmann::json::array()}};
+            for(const auto& p:plan->cartesianControlPoints.points) {
+                const auto& t=p.tcpPose;const Eigen::Quaterniond q(t.linear());
+                source["points"].push_back({{"position_m",{t.translation().x(),t.translation().y(),t.translation().z()}},
+                    {"quaternion_xyzw",{q.x(),q.y(),q.z(),q.w()}},{"time_s",p.time}});
+            }
+            const auto directory=QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)+QStringLiteral("/trajectory-segments/")+QDateTime::currentDateTimeUtc().toString(QStringLiteral("yyyyMMdd-hhmmss-zzz"));
+            motion_planning::ZigzagSegmentationOptions options;options.directionAngleDegrees=angle;options.minimumScanLength=minimumMm/1000;
+            const auto result=nlohmann::json::parse(motion_planning::segmentZigzagTrajectoryJson(source.dump(),toFilesystemPath(directory),options));
+            QVector<QStringList> rows;
+            for(const auto& s:result.at("segments")) rows.push_back({QString::number(s.at("index").get<int>()+1),QString::number(s.at("first").get<int>()+1),
+                QString::number(s.at("last").get<int>()+1),QString::number(s.at("point_count").get<int>()),QString::number(s.at("length_m").get<double>())});
+            m_segmentSourceFingerprint=scanSourceFingerprint(*plan);
+            m_widget.setSegmentResults(rows,QStringLiteral("%1 段，逐段保存：%2；选择行后以紫红色显示").arg(rows.size()).arg(directory));
+            if(auto* viewport=m_context.motionPlanningViewport()) {viewport->setTrajectoryControlPointOverlay(m_selectedTrajectoryId,cartesianControlPointTransforms(*plan),true,m_trajectoryOrientationsVisible);viewport->setTrajectoryHighlightRange(-1,-1);}
+        } catch(const std::exception& e) {m_widget.setSegmentResults({},QString::fromUtf8(e.what()));}
+    }
+
     void MotionPlanningModuleController::refreshTrajectoryOverlay()
     {
+
         if(auto* viewport = m_context.motionPlanningViewport()) {
             const auto plans = motion_planning::MotionPlanningProjectStore::plans(m_context.document());
             const auto plan = std::find_if(plans.begin(), plans.end(), [this](const auto& item) {
                 return item.id == m_selectedTrajectoryId.toStdString() && item.robotId == m_selectedRobotId.toStdString();
             });
+            const auto fingerprint=plan!=plans.end()?scanSourceFingerprint(*plan):std::string();
+            if(fingerprint!=m_segmentSourceFingerprint) {
+                m_segmentSourceFingerprint.clear();m_widget.setSegmentResults({},QStringLiteral("请选择轨迹并分段"));viewport->setTrajectoryHighlightRange(-1,-1);
+            }
             if(plan != plans.end() && !plan->cartesianControlPoints.empty()) {
                 viewport->setTrajectoryControlPointOverlay(QString::fromStdString(plan->id),
                     cartesianControlPointTransforms(*plan), m_trajectoryPointsVisible, m_trajectoryOrientationsVisible);
@@ -2786,9 +3071,19 @@ namespace robot_qt_viewer
     }
 
     bool MotionPlanningModuleController::commitMotionPlanUpdate(
-        const motion_planning::StoredMotionPlan& plan,
-        const QString& sourceId)
+        motion_planning::StoredMotionPlan plan,
+        const QString& sourceId, int insertedIndex, int removedIndex)
     {
+        if(sourceId == QStringLiteral("motionPlanningTransformTrajectory") ||
+            sourceId == QStringLiteral("motionPlanningInsertControlPoint") ||
+            sourceId == QStringLiteral("motionPlanningDeleteControlPoint") ||
+            sourceId == QStringLiteral("motionPlanningEditControlPoint")) {
+            if(!PlanningTrajectoryTransfer::updateCartesianProcessData(plan,insertedIndex,removedIndex)) {
+                m_widget.setResult(QStringLiteral("工艺数据与控制点不一致，未保存此次编辑。"),false);
+                return false;
+            }
+            clearGraphCdfSeed();
+        }
         const ProjectMutationResult mutation = m_context.documentController().mutateProject(
             sourceId,
             ProjectDirtyPolicy::UserEdit,
@@ -3242,6 +3537,7 @@ namespace robot_qt_viewer
         }
         stopJointPlayback();
         m_graphCdfRobotId = m_selectedRobotId;
+        m_cdfSeedPlan = std::make_unique<motion_planning::StoredMotionPlan>(selected);
         const QString label = byStart ? m_graphStartLabels.value(row) : QStringLiteral("\u5168\u5c40 Top-M #%1").arg(row + 1);
         clearCdfAnalysis();
         m_cdfSourceName = QStringLiteral("%1 | %2 | cost=%3")
@@ -3262,8 +3558,9 @@ namespace robot_qt_viewer
 
     void MotionPlanningModuleController::clearGraphCdfSeed()
     {
-        if(m_graphCdfRobotId.isEmpty()) { return; }
+        if(m_graphCdfRobotId.isEmpty() && !m_cdfSeedPlan) { return; }
         m_graphCdfRobotId.clear();
+        m_cdfSeedPlan.reset();
         m_cdfSourceName.clear(); m_cdfJointNames.clear(); m_cdfJointPoints.clear();
         refreshCdfJointAngleView();
         m_widget.setCdfExportAvailable(false);

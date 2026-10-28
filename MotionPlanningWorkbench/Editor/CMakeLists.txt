@@ -3,6 +3,8 @@ cmake_minimum_required(VERSION 3.20)
 set(TARGET_NAME MotionPlanningEditor)
 
 set(SOURCES
+    PlanningTrajectoryTransfer.cpp
+    PlanningTrajectoryTransfer.h
     CdfTrajectoryAnalysisDialog.cpp
     CdfTrajectoryAnalysisDialog.h
     ConfigurationSelectionDialog.cpp
@@ -16,6 +18,9 @@ set(SOURCES
 )
 
 add_library(${TARGET_NAME} STATIC ${SOURCES})
+if(MSVC)
+    target_compile_options(${TARGET_NAME} PRIVATE /utf-8)
+endif()
 add_library(SMRobotWorkbenchMotionPlanning::${TARGET_NAME} ALIAS ${TARGET_NAME})
 
 target_include_directories(${TARGET_NAME}
@@ -26,12 +31,14 @@ target_include_directories(${TARGET_NAME}
 
 target_link_libraries(${TARGET_NAME}
     PUBLIC
+        SMRobotMotionPlanning::MotionPlanningCore
         $<BUILD_INTERFACE:RobotQtModulesShared>
         $<INSTALL_INTERFACE:SMRobotWorkbenchCommon::RobotQtModulesShared>
     PRIVATE
         $<BUILD_INTERFACE:RobotQtModulesCoreWidgets>
         $<INSTALL_INTERFACE:SMRobotWorkbenchCommon::RobotQtModulesCoreWidgets>
         SMRobotMotionPlanning::ProjectMotionPlanning
+        nlohmann_json::nlohmann_json
 )
 
 target_compile_features(${TARGET_NAME} PUBLIC cxx_std_17)
@@ -46,6 +53,7 @@ set_target_properties(${TARGET_NAME}
 if(ExportPacakge${PACKAGE_NAME})
     set(${TARGET_NAME}_INSTALL_PUBLIC_DEPENDENCIES
         SMRobotWorkbenchCommon::RobotQtModulesShared
+        SMRobotMotionPlanning::MotionPlanningCore
         SMRobotWorkbenchCommon::RobotQtModulesCoreWidgets
         SMRobotMotionPlanning::ProjectMotionPlanning
     )

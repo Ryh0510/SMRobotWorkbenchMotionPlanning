@@ -426,6 +426,30 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
 
     m_importButton = new QPushButton(QStringLiteral("Import trajectory..."), this);
     layout->addWidget(m_importButton);
+    auto* segmentButton=new QPushButton(QStringLiteral("按往复扫描线分离轨迹"),basicPage);
+    segmentButton->setObjectName(QStringLiteral("segmentZigzagTrajectory"));
+    auto* splitForm=new QFormLayout();
+    auto* splitAngle=new QDoubleSpinBox(basicPage);splitAngle->setRange(5,85);splitAngle->setValue(60);splitAngle->setSuffix(QStringLiteral(" °"));
+    auto* splitLength=new QDoubleSpinBox(basicPage);splitLength->setRange(.01,10000);splitLength->setValue(5);splitLength->setSuffix(QStringLiteral(" mm"));
+    splitForm->addRow(QStringLiteral("扫描方向角阈值"),splitAngle);splitForm->addRow(QStringLiteral("反向确认最小长度"),splitLength);
+    layout->addLayout(splitForm);layout->addWidget(segmentButton);
+    m_segmentStatus=new QLabel(QStringLiteral("分离轨迹结果：尚未分段"),basicPage);m_segmentStatus->setWordWrap(true);layout->addWidget(m_segmentStatus);
+    m_segmentTable=new QTableWidget(0,5,basicPage);m_segmentTable->setObjectName(QStringLiteral("trajectorySegmentResults"));
+    m_segmentTable->setHorizontalHeaderLabels({QStringLiteral("段"),QStringLiteral("起点"),QStringLiteral("终点"),QStringLiteral("点数"),QStringLiteral("长度 m")});
+    m_segmentTable->setSelectionBehavior(QAbstractItemView::SelectRows);m_segmentTable->setEditTriggers(QAbstractItemView::NoEditTriggers);m_segmentTable->setMaximumHeight(190);layout->addWidget(m_segmentTable);
+    connect(segmentButton,&QPushButton::clicked,this,[this,splitAngle,splitLength] { emit segmentTrajectoryRequested(splitAngle->value(),splitLength->value()); });
+    connect(m_segmentTable,&QTableWidget::itemSelectionChanged,this,[this] {
+        const int row=m_segmentTable->currentRow();
+        if(row>=0 && m_segmentTable->item(row,1)) emit segmentSelectionChanged(m_segmentTable->item(row,1)->text().toInt()-1,m_segmentTable->item(row,2)->text().toInt()-1);
+    });
+    m_transferStatus = new QLabel(QStringLiteral("曲面轨迹生成后会自动接收；CDF 优化成功后自动同步涂层分析。"), basicPage);
+    m_transferStatus->setObjectName(QStringLiteral("planningTransferStatus"));
+    m_transferStatus->setWordWrap(true);
+    layout->addWidget(m_transferStatus);
+    auto* sendToCoating = new QPushButton(QStringLiteral("将当前轨迹发送到涂层分析"), basicPage);
+    sendToCoating->setObjectName(QStringLiteral("sendTrajectoryToCoating"));
+    layout->addWidget(sendToCoating);
+    connect(sendToCoating, &QPushButton::clicked, this, &MotionPlanningEditorWidget::sendTrajectoryToCoatingRequested);
 
     m_trajectoryPointsVisible = new QCheckBox(
         QStringLiteral("\u663e\u793a\u8f68\u8ff9\u70b9"), basicPage);
@@ -711,7 +735,7 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
     layout->addWidget(m_plotSprayMeasurements);
     m_plotNearestDistances = new QPushButton(QStringLiteral("\u7ed8\u5236\u6700\u8fd1\u8ddd\u79bb\u53d8\u5316\u56fe"), basicPage);
     m_plotNearestDistances->setObjectName(QStringLiteral("plotNearestDistances"));
-    m_plotNearestDistances->setToolTip(QStringLiteral("Query every source point of the last playback using its collision scene snapshot. Playback must be stopped."));
+    m_plotNearestDistances->setToolTip(QStringLiteral("Query every joint point of the selected trajectory against the current robot/workpiece collision snapshot. Playback must be stopped."));
     layout->addWidget(m_plotNearestDistances);
     connect(m_plotNearestDistances, &QPushButton::clicked, this, &MotionPlanningEditorWidget::plotNearestDistancesRequested);
 
@@ -732,6 +756,10 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
 
     m_importCdfButton = new QPushButton(QStringLiteral("Import CDF joint angles..."), cdfPage);
     cdfLayout->addWidget(m_importCdfButton);
+    auto* useSelectedForCdf = new QPushButton(QStringLiteral("使用当前关节轨迹作为 CDF 初始解"), cdfPage);
+    useSelectedForCdf->setObjectName(QStringLiteral("useCurrentTrajectoryForCdf"));
+    cdfLayout->addWidget(useSelectedForCdf);
+    connect(useSelectedForCdf, &QPushButton::clicked, this, &MotionPlanningEditorWidget::useCurrentTrajectoryForCdfRequested);
 
     m_cdfJointTable = new QTableWidget(cdfPage);
     m_cdfJointTable->setObjectName(QStringLiteral("cdfInitialJointAngles"));
@@ -741,13 +769,17 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
     m_applyCdfJointButton = new QPushButton(QStringLiteral("Apply selected CDF joint angles"), cdfPage);
     cdfLayout->addWidget(m_applyCdfJointButton);
 
-    auto* cdfRepairTitle = new QLabel(QStringLiteral("APF + CDF/QP Collision Repair"), cdfPage);
+    auto* cdfRepairTitle = new QLabel(QStringLiteral("GA -> APF -> optional CDF/QP"), cdfPage);
     cdfRepairTitle->setProperty("panelTitle", true);
     cdfLayout->addWidget(cdfRepairTitle);
 
     auto* cdfRepairForm = new QFormLayout();
     cdfRepairForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
 
+    m_gaSprayDistance = makePoseSpinBox(cdfPage, 0.1, 10000.0, 100.0, 5.0, QStringLiteral(" mm"));
+    m_gaSprayDistance->setObjectName(QStringLiteral("gaSprayDistance"));
+    m_gaSprayDistance->setToolTip(QStringLiteral("Surface anchor = original TCP + distance * original local +Z. Preserve already safe controls; repair unsafe controls with 5000 equal-area random poses in an 80 degree normal cone and free axial rotation. Unsafe generations 3/4/5 unlock +/-30/50/80% of this original distance. Keep nominal-radius offspring and add radius offspring. Fix the selected per-point distances after GA. No single-point time limit; Cancel stops the search."));
+    cdfRepairForm->addRow(QStringLiteral("GA 原始喷涂距离"), m_gaSprayDistance);
     m_cdfTcpDeviation = makePoseSpinBox(cdfPage, 1.0, 1000.0, 100.0, 5.0, QStringLiteral(" mm"));
     m_cdfTcpDeviation->setObjectName(QStringLiteral("cdfApfTcpDeviation"));
     m_cdfTcpDeviation->setToolTip(QStringLiteral("\u4ee5\u539f\u59cb\u672b\u7aef\u63a7\u5236\u70b9\u6298\u7ebf\u4e3a\u53c2\u8003\uff0cAPF\u3001\u5e73\u6ed1\u4e0eQP\u5747\u5fc5\u987b\u9075\u5b88\uff1b\u8303\u56f4\u5185\u65e0\u6cd5\u7ed5\u5f00\u5219\u5931\u8d25\uff0c\u4e0d\u81ea\u52a8\u653e\u5bbd\u3002\u4ec5\u9650\u5236\u4f4d\u7f6e\uff0c\u4e0d\u9501\u5b9a\u59ff\u6001\u3002"));
@@ -803,6 +835,9 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
     m_cdfSmoothingPasses->setRange(0, 12); m_cdfSmoothingPasses->setValue(6);
     m_cdfSmoothingPasses->setToolTip(QStringLiteral("0: off; 1-3: one multiscale cycle; 4-6: two; 7-12: three. Every cycle checks 128, 64, 32, 16, 8, 4 and 2-node windows against the ordered TCP corridor and collisions."));
     cdfRepairForm->addRow(QStringLiteral("\u78b0\u649e\u7ea6\u675f\u5e73\u6ed1\u5f3a\u5ea6"), m_cdfSmoothingPasses);
+    m_cdfUseCdf = new QCheckBox(QStringLiteral("Optimize accepted APF with CDF/QP"), cdfPage);
+    m_cdfUseCdf->setObjectName(QStringLiteral("cdfOptionalOptimization"));
+    m_cdfUseCdf->setChecked(false); cdfRepairForm->addRow(QString(), m_cdfUseCdf);
     m_cdfRetime = new QCheckBox(QStringLiteral("\u91cd\u65b0\u5b9a\u65f6\u5e76\u68c0\u67e5\u79bb\u6563\u901f\u5ea6 / \u52a0\u901f\u5ea6"), cdfPage);
     m_cdfRetime->setChecked(true); cdfRepairForm->addRow(QString(), m_cdfRetime);
     m_cdfFallbackVelocity = makePoseSpinBox(cdfPage, 0.1, 1000.0, 60.0, 5.0, QStringLiteral(" deg/s"));
@@ -813,13 +848,23 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
     cdfRepairForm->addRow(QStringLiteral("\u7f3a\u5931\u52a0\u901f\u5ea6\u9650\u4f4d\u7684\u7f3a\u7701\u503c"), m_cdfFallbackAcceleration);
     cdfLayout->addLayout(cdfRepairForm);
 
-    m_repairCdfTrajectoryButton = new QPushButton(QStringLiteral("Repair imported trajectory with APF + CDF/QP"), cdfPage);
+    m_repairCdfTrajectoryButton = new QPushButton(QStringLiteral("Run GA -> APF -> optional CDF/QP"), cdfPage);
+    m_repairCdfTrajectoryButton->setObjectName(QStringLiteral("runGaApfCdf"));
     cdfLayout->addWidget(m_repairCdfTrajectoryButton);
 
     m_exportCdfTrajectoryButton = new QPushButton(
         QStringLiteral("Export APF + CDF/QP trajectory..."),
         cdfPage);
     cdfLayout->addWidget(m_exportCdfTrajectoryButton);
+    m_exportCdfTcpTrajectoryButton = new QPushButton(
+        QStringLiteral("\u5bfc\u51fa\u672b\u7aef\u8f68\u8ff9\uff08.txt\uff09..."), cdfPage);
+    m_exportCdfTcpTrajectoryButton->setObjectName(QStringLiteral("exportCdfTcpTrajectory"));
+    m_exportCdfTcpTrajectoryButton->setToolTip(QStringLiteral(
+        "CDF/QP final trajectory: all world TCP poses, including the current tool; "
+        "4x4 matrix (translation in mm), time (s), blank separator, as in 11111.txt."));
+    cdfLayout->addWidget(m_exportCdfTcpTrajectoryButton);
+    connect(m_exportCdfTcpTrajectoryButton, &QPushButton::clicked,
+        this, &MotionPlanningEditorWidget::exportCdfTcpTrajectoryRequested);
     m_exportCdfRapidButton = new QPushButton(QStringLiteral("\u5bfc\u51fa CDF RAPID \u7a0b\u5e8f\uff08.mod\uff09..."), cdfPage);
     m_exportCdfRapidButton->setObjectName(QStringLiteral("exportCdfRapid"));
     m_exportCdfRapidButton->setToolTip(QStringLiteral("\u6309 MainModule.mod \u6a21\u677f\u5bfc\u51fa\u5168\u90e8 CDF TCP \u76ee\u6807\u5750\u6807\uff0c\u56fa\u5b9a\u4f7f\u7528 MoveL/v50/z10/tool0 \u548c wobj0\uff0c\u4e0d\u8f93\u51fa\u81ea\u5b9a\u4e49\u5de5\u5177\u3002tool0 \u5c06\u8fd9\u4e9b\u5750\u6807\u89e3\u91ca\u4e3a\u6cd5\u5170\u76ee\u6807\uff1b\u672a\u81ea\u52a8\u8865\u507f\u55b7\u67aa\u504f\u7f6e\u3002"));
@@ -901,6 +946,14 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
     for(auto* control : {m_transformImport, m_transformDelete, m_transformApply, m_transformExport}) {
         transformLayout->addWidget(control);
     }
+    m_transformRapid = new QPushButton(QStringLiteral("\u5bfc\u51fa ABB \u7a0b\u5e8f\uff08.mod\uff09..."), transformPage);
+    m_transformRapid->setObjectName(QStringLiteral("exportTransformRapid"));
+    m_transformRapid->setToolTip(QStringLiteral("\u76f4\u63a5\u5bfc\u51fa\u5f53\u524d\u9009\u4e2d\u8f68\u8ff9\u7684\u4f4d\u7f6e\u548c\u59ff\u6001\u3002\u6cbf\u7528 CDF \u683c\u5f0f\uff1aMainModule / MoveL / v50 / z10 / tool0 / wobj0\uff1b\u4f4d\u7f6e\u4e0d\u8865\u507f\u5de5\u5177\u504f\u7f6e\u3002"));
+    transformLayout->addWidget(m_transformRapid);
+    m_transformFanuc = new QPushButton(QStringLiteral("\u5bfc\u51fa\u53d1\u90a3\u79d1\u7a0b\u5e8f\uff08.LS\uff09..."), transformPage);
+    m_transformFanuc->setObjectName(QStringLiteral("exportTransformFanuc"));
+    m_transformFanuc->setToolTip(QStringLiteral("\u76f4\u63a5\u5bfc\u51fa\u5f53\u524d\u9009\u4e2d\u8f68\u8ff9\u7684\u4f4d\u7f6e\u548c\u59ff\u6001\u3002\u6cbf\u7528 JHA.LS \u683c\u5f0f\uff1aUF2 / UT1 / L / 400mm/sec / CNT100\uff1b\u8bf7\u5339\u914d\u63a7\u5236\u5668\u4e2d\u7684\u5750\u6807\u7cfb\u548c\u5de5\u5177\u3002"));
+    transformLayout->addWidget(m_transformFanuc);
     m_transformResult = new QLabel(transformPage);
     m_transformResult->setWordWrap(true);
     transformLayout->addWidget(m_transformResult);
@@ -909,6 +962,8 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
     connect(m_transformDelete, &QPushButton::clicked, this, &MotionPlanningEditorWidget::deleteTransformTrajectoryRequested);
     connect(m_transformApply, &QPushButton::clicked, this, &MotionPlanningEditorWidget::transformTrajectoryRequested);
     connect(m_transformExport, &QPushButton::clicked, this, &MotionPlanningEditorWidget::exportTransformTrajectoryRequested);
+    connect(m_transformRapid, &QPushButton::clicked, this, &MotionPlanningEditorWidget::exportTransformRapidRequested);
+    connect(m_transformFanuc, &QPushButton::clicked, this, &MotionPlanningEditorWidget::exportTransformFanucRequested);
     connect(m_transformTrajectoryCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index) {
         if(index >= 0) {
             emit trajectorySelectionChanged(m_transformTrajectoryCombo->currentData().toString());
@@ -1207,6 +1262,7 @@ MotionPlanningEditorWidget::CdfQpRepairSettings MotionPlanningEditorWidget::cdfQ
 {
     CdfQpRepairSettings settings;
     settings.allowEquivalentConfigurations = m_cdfEquivalentConfigurations->isChecked();
+    settings.gaSprayDistance = m_gaSprayDistance->value() / 1000.0;
     settings.apfMaxTcpDeviation = m_cdfTcpDeviation->value() / 1000.0;
     settings.safetyMargin = m_cdfSafetyMargin != nullptr ? m_cdfSafetyMargin->value() : settings.safetyMargin;
     settings.targetClearance = m_cdfTargetClearance != nullptr ? m_cdfTargetClearance->value() : settings.targetClearance;
@@ -1229,6 +1285,7 @@ MotionPlanningEditorWidget::CdfQpRepairSettings MotionPlanningEditorWidget::cdfQ
     settings.smoothWeight = m_cdfSmoothWeight->value();
     settings.smoothingPasses = m_cdfSmoothingPasses->value();
     settings.retimeOutput = m_cdfRetime->isChecked();
+    settings.useCdf = m_cdfUseCdf->isChecked();
     settings.fallbackVelocityDegrees = m_cdfFallbackVelocity->value();
     settings.fallbackAccelerationDegrees = m_cdfFallbackAcceleration->value();
     return settings;
@@ -1298,6 +1355,7 @@ void MotionPlanningEditorWidget::setTrajectoryView(
     populateTrajectoryTable(m_poseTable, posePoints, emptyPoseText);
     populateTrajectoryTable(m_jointTable, jointPoints, emptyJointText);
     updateTrajectoryActions();
+    updateCdfActions();
 }
 
 void MotionPlanningEditorWidget::setCdfJointAngleView(
@@ -1453,7 +1511,9 @@ void MotionPlanningEditorWidget::updateTrajectoryActions()
         m_transformDelete->setEnabled(hasCartesian && idle);
         m_transformApply->setEnabled(hasCartesian && idle);
         m_transformExport->setEnabled(hasCartesian && idle);
-        m_plotNearestDistances->setEnabled(m_nearestDistanceAvailable && !m_playbackActive);
+        m_transformRapid->setEnabled(hasCartesian && idle);
+        m_transformFanuc->setEnabled(hasCartesian && idle);
+        m_plotNearestDistances->setEnabled((m_nearestDistanceAvailable || (hasRobot && hasJoint && hasAnyJointRow)) && !m_playbackActive);
     }
     if(m_graphFilter) {
         m_graphFilter->setEnabled(m_graphBusy || (!m_multiIkBusy && m_multiIkComplete && !m_playbackActive));
@@ -1500,7 +1560,7 @@ void MotionPlanningEditorWidget::updateCdfActions()
     const bool hasRobot = m_robotValue != nullptr &&
         m_robotValue->text() != QStringLiteral("No robot selected");
     const bool hasValidRow = selectedOriginalPointIndex(m_cdfJointTable) >= 0;
-    const bool hasImportedRows = hasAnyOriginalPointRow(m_cdfJointTable);
+    const bool hasImportedRows = hasAnyOriginalPointRow(m_cdfJointTable) || hasAnyOriginalPointRow(m_poseTable);
 
     if(m_importCdfButton != nullptr) {
         m_importCdfButton->setEnabled(hasRobot);
@@ -1540,6 +1600,9 @@ void MotionPlanningEditorWidget::updateCdfActions()
     }
     if(m_exportCdfTrajectoryButton != nullptr) {
         m_exportCdfTrajectoryButton->setEnabled(hasRobot && m_cdfExportAvailable);
+    }
+    if(m_exportCdfTcpTrajectoryButton) {
+        m_exportCdfTcpTrajectoryButton->setEnabled(hasRobot && m_cdfExportAvailable && !m_playbackActive);
     }
     if(m_exportCdfRapidButton) {
         m_exportCdfRapidButton->setEnabled(hasRobot && m_cdfExportAvailable && !m_playbackActive);
@@ -1688,4 +1751,16 @@ void MotionPlanningEditorWidget::setLayeredGraphBusy(bool busy, const QString& m
 void MotionPlanningEditorWidget::showCdfPage()
 {
     m_tabs->setCurrentIndex(1);
+}
+
+void MotionPlanningEditorWidget::setTransferStatus(const QString& message)
+{
+    m_transferStatus->setText(message);
+}
+
+void MotionPlanningEditorWidget::setSegmentResults(const QVector<QStringList>& rows,const QString& status) {
+    QSignalBlocker block(m_segmentTable);m_segmentTable->setRowCount(rows.size());
+    for(int i=0;i<rows.size();++i)for(int j=0;j<rows[i].size();++j)m_segmentTable->setItem(i,j,new QTableWidgetItem(rows[i][j]));
+    m_segmentTable->clearSelection();m_segmentTable->setCurrentCell(-1,-1);
+    m_segmentStatus->setText(status);
 }

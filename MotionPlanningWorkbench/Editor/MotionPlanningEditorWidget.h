@@ -61,6 +61,7 @@ public:
 
     struct CdfQpRepairSettings
     {
+        double gaSprayDistance = 0.10;
         double apfMaxTcpDeviation = 0.10;
         bool allowEquivalentConfigurations = true;
         double safetyMargin = 0.01;
@@ -76,6 +77,7 @@ public:
         double smoothWeight = 2.0;
         int smoothingPasses = 6;
         bool retimeOutput = true;
+        bool useCdf = false;
         double fallbackVelocityDegrees = 60.0;
         double fallbackAccelerationDegrees = 120.0;
     };
@@ -95,6 +97,8 @@ public:
     void showConfigurationSelection(const QVector<QVector<int>>& sequences,
         const QVector<QVector<int>>& startSequences, const QStringList& startLabels, int initialRank, bool byStart, const ConfigurationSelectionCatalog& catalog);
     void showCdfPage();
+    void setSegmentResults(const QVector<QStringList>& rows, const QString& status);
+    void setTransferStatus(const QString& message);
 
     void setRobotId(const QString& robotId);
     void setJointDefaults(const QString& jointNames, const QString& startJoints);
@@ -146,11 +150,15 @@ signals:
         const QString& jointNames,
         double duration,
         int sampleCount);
+    void segmentTrajectoryRequested(double angleDegrees, double minimumLengthMm);
+    void segmentSelectionChanged(int first, int last);
     void importTrajectoryRequested();
     void importTransformTrajectoryRequested();
     void deleteTransformTrajectoryRequested();
     void transformTrajectoryRequested();
     void exportTransformTrajectoryRequested();
+    void exportTransformRapidRequested();
+    void exportTransformFanucRequested();
     void plotNearestDistancesRequested();
     void exportNearestDistancesRequested(const QString& report);
     void multiIkRequested(bool useTool, const QVector<double>& lowerDegrees,
@@ -170,6 +178,8 @@ signals:
     void inverseKinematicsRequested(bool useToolTransform);
     void applySelectedJointPointRequested(int pointIndex);
     void importCdfJointAnglesRequested();
+    void useCurrentTrajectoryForCdfRequested();
+    void sendTrajectoryToCoatingRequested();
     void applySelectedCdfJointAnglesRequested(int pointIndex);
     void repairImportedCdfTrajectoryRequested();
     void cdfStageChanged(int stage);
@@ -179,6 +189,7 @@ signals:
     void cdfAnalysisRequested();
     void exportCdfQualityRequested();
     void exportCdfTrajectoryRequested();
+    void exportCdfTcpTrajectoryRequested();
     void exportCdfRapidRequested();
     void exportCdfFanucRequested();
     void insertControlPointBeforeRequested(int pointIndex);
@@ -198,6 +209,7 @@ signals:
     void trajectorySelectionChanged(const QString& trajectoryId);
 
 private:
+    QLabel* m_transferStatus = nullptr;
     void updateTrajectoryActions();
     void updateCdfActions();
     void showControlPointContextMenu(const QPoint& pos);
@@ -209,6 +221,8 @@ private:
     QPushButton* m_transformDelete = nullptr;
     QPushButton* m_transformApply = nullptr;
     QPushButton* m_transformExport = nullptr;
+    QPushButton* m_transformRapid = nullptr;
+    QPushButton* m_transformFanuc = nullptr;
     QPushButton* m_plotNearestDistances = nullptr;
     bool m_nearestDistanceAvailable = false;
     QSpinBox* m_graphMaxPaths = nullptr;
@@ -243,6 +257,8 @@ private:
     QDoubleSpinBox* m_duration = nullptr;
     QSpinBox* m_sampleCount = nullptr;
     QPushButton* m_planButton = nullptr;
+    QTableWidget* m_segmentTable = nullptr;
+    QLabel* m_segmentStatus = nullptr;
     QPushButton* m_importButton = nullptr;
     QComboBox* m_ikToolMode = nullptr;
     QPushButton* m_solveIkButton = nullptr;
@@ -264,6 +280,7 @@ private:
     QPushButton* m_importCdfButton = nullptr;
     QTableWidget* m_cdfJointTable = nullptr;
     QPushButton* m_applyCdfJointButton = nullptr;
+    QDoubleSpinBox* m_gaSprayDistance = nullptr;
     QDoubleSpinBox* m_cdfTcpDeviation = nullptr;
     QDoubleSpinBox* m_cdfSafetyMargin = nullptr;
     QDoubleSpinBox* m_cdfTargetClearance = nullptr;
@@ -280,6 +297,7 @@ private:
     QPushButton* m_exportCdfTrajectoryButton = nullptr;
     QPushButton* m_exportCdfRapidButton = nullptr;
     QPushButton* m_exportCdfFanucButton = nullptr;
+    QPushButton* m_exportCdfTcpTrajectoryButton = nullptr;
     QLabel* m_cdfResult = nullptr;
     QComboBox* m_cdfStageCombo = nullptr;
     QTableWidget* m_cdfStageTable = nullptr;
@@ -292,6 +310,7 @@ private:
     QCheckBox* m_cdfStageActualTiming = nullptr;
     QDoubleSpinBox* m_cdfSmoothWeight = nullptr;
     QSpinBox* m_cdfSmoothingPasses = nullptr;
+    QCheckBox* m_cdfUseCdf = nullptr;
     QCheckBox* m_cdfRetime = nullptr;
     QDoubleSpinBox* m_cdfFallbackVelocity = nullptr;
     QDoubleSpinBox* m_cdfFallbackAcceleration = nullptr;
