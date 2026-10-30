@@ -560,6 +560,8 @@ namespace robot_qt_viewer
             this, &MotionPlanningModuleController::exportCdfTrajectory);
         connect(&m_widget, &MotionPlanningEditorWidget::exportCdfTcpTrajectoryRequested,
             this, &MotionPlanningModuleController::exportCdfTcpTrajectory);
+        connect(&m_widget, &MotionPlanningEditorWidget::exportDownsampledCdfTrajectoryRequested,
+            this, &MotionPlanningModuleController::exportDownsampledCdfTrajectory);
         connect(&m_widget, &MotionPlanningEditorWidget::exportCdfRapidRequested,
             this, &MotionPlanningModuleController::exportCdfRapid);
         connect(&m_widget, &MotionPlanningEditorWidget::exportCdfFanucRequested,
@@ -1918,6 +1920,144 @@ namespace robot_qt_viewer
         showResult(QStringLiteral("Exported all %1 final CDF/QP TCP poses: %2\n"
             "11111.txt format: 4x4 world TCP matrix (mm), recorded time (s), blank separator.")
             .arg(static_cast<qulonglong>(plan->trajectory.points.size())).arg(path), true);
+    }
+
+    void MotionPlanningModuleController::exportDownsampledCdfTrajectory(int targetPoints)
+    {
+        const auto showResult=[this](const QString& text,bool success) {
+            m_widget.setCdfResult(text,success);emit statusMessageRequested(text,10000);
+        };
+        const auto document=m_context.document();
+        const auto plans=motion_planning::MotionPlanningProjectStore::plans(document);
+        const auto* selected=findMotionPlan(plans,m_selectedRobotId,m_selectedTrajectoryId);
+        if(!selected || !isCdfQpTrajectory(*selected) || targetPoints<2) {
+            showResult(QStringLiteral("Select the optimized GA/APF/CDF trajectory and a target >= 2."),false);return;
+        }
+        stopJointPlayback();
+        const auto basePath=projectBasePath(m_context.projectSession());
+        motion_planning::ExternalTrajectoryEvaluationRequest request;
+        request.plan=*selected;
+        request.collisionDetectorIds=playbackCollisionDetectorIds(document,m_selectedRobotId);
+        if(request.collisionDetectorIds.empty()) {
+            showResult(QStringLiteral("Configure the robot/workpiece collision detectors before downsampling."),false);return;
+        }
+        for(auto& point:request.plan.trajectory.points) {
+            point.q=maybeMapIrb4600JointSigns(document,m_selectedRobotId,point.q);
+            point.qd.clear();point.qdd.clear();
+        }
+        request.pipelineStage="downsample";request.preferredOutputWaypoints=std::size_t(targetPoints);
+        request.verificationTrajectory=request.plan.trajectory;
+        request.validationJointStep=.00025;
+        request.maximumTcpPositionDeviation=.001;request.maximumTcpOrientationDeviation=.01;
+        const auto settings=m_widget.cdfQpRepairSettings();
+        request.minimumClearance=settings.targetClearance;
+        request.cdfOptions.fallbackMaxVelocity=settings.fallbackVelocityDegrees*kPi/180.;
+        request.cdfOptions.fallbackMaxAcceleration=settings.fallbackAccelerationDegrees*kPi/180.;
+        motion_planning::ExternalTrajectoryEvaluationResult result;
+        CdfProgressDialog dialog(&m_widget);
+        dialog.setObjectName(QStringLiteral("cdfDownsampleProgress"));
+        dialog.setWindowTitle(QStringLiteral("\u964d\u91c7\u6837\uff1a\u78b0\u649e\u5b89\u5168\u6821\u9a8c"));
+        dialog.setWindowModality(Qt::ApplicationModal);
+        dialog.setWindowFlags(dialog.windowFlags() & ~Qt::WindowCloseButtonHint);
+        auto* layout=new QVBoxLayout(&dialog);
+        auto* label=new QLabel(&dialog);label->setWordWrap(true);label->setTextFormat(Qt::PlainText);
+        auto* cancel=new QPushButton(QStringLiteral("\u53d6\u6d88"),&dialog);
+        layout->addWidget(label);layout->addWidget(cancel);dialog.resize(620,160);
+        std::atomic_bool cancelled{false};bool sourceChanged=false;
+        connect(cancel,&QPushButton::clicked,&dialog,[&](){cancelled.store(true);cancel->setEnabled(false);});
+        for(const auto kind:{RobotQtViewerEventKind::ProjectOpened,RobotQtViewerEventKind::ProjectDocumentChanged,
+            RobotQtViewerEventKind::AttachmentChanged,RobotQtViewerEventKind::CollisionChanged,RobotQtViewerEventKind::ToolSetupChanged})
+            m_context.eventHub().subscribe(kind,&dialog,[&](const auto&){sourceChanged=true;cancelled.store(true);});
+        QElapsedTimer clock;clock.start();QString phase=QStringLiteral("\u6b63\u5728\u51c6\u5907\u72ec\u7acb\u78b0\u649e\u573a\u666f");
+        const auto update=[&]() {label->setText(QStringLiteral("%1 s | %2 -> target %3 points\n%4")
+            .arg(clock.elapsed()/1000).arg(static_cast<qulonglong>(request.verificationTrajectory.points.size()))
+            .arg(targetPoints).arg(phase));};
+        QTimer timer;connect(&timer,&QTimer::timeout,&dialog,update);timer.start(1000);update();
+        request.cancelled=[&](){return cancelled.load();};
+        request.progress=[&](const std::string& message) {
+            QMetaObject::invokeMethod(&dialog,[&,message](){
+                const auto event=nlohmann::json::parse(message,nullptr,false);
+                if(event.is_object() && event.value("type",std::string())=="safe_downsampling")
+                    phase=QStringLiteral("\u6b63\u5728\u68c0\u67e5\u8fde\u63a5\uff1a\u6682\u4fdd\u7559 %1 \u70b9\uff0c\u5f85\u68c0\u67e5 %2 \u6761\u8fde\u63a5")
+                        .arg(event.value("retained",std::size_t(0))).arg(event.value("pending_edges",std::size_t(0)));
+                else if(message=="Building isolated planning scene")phase=QStringLiteral("\u6b63\u5728\u51c6\u5907\u72ec\u7acb\u78b0\u649e\u573a\u666f");
+                else phase=QStringLiteral("\u6b63\u5728\u6821\u9a8c\u8f68\u8ff9\u53ca\u8fd0\u52a8\u7ea6\u675f\uff0c\u8bf7\u7a0d\u5019");
+                update();
+            },Qt::QueuedConnection);
+        };
+        std::unique_ptr<QThread> worker(QThread::create([&]() {
+            try {
+                std::string error;
+                if(!motion_planning::resolvePlanningTcp(document,request.plan.robotId,request.tcpLinkName,request.linkFromTcp,error))
+                    throw std::runtime_error(error);
+                motion_planning::ProjectPlanningRequest query;
+                query.robotId=request.plan.robotId;query.jointNames=request.plan.jointNames;query.collisionDetectorIds=request.collisionDetectorIds;
+                auto scene=motion_planning::ProjectPlanningSceneBuilder::build(document,basePath,query,&error);
+                if(!scene)throw std::runtime_error(error);
+                // New plans restore immutable source anchors and GA-selected distances.
+                // Legacy plans retain the exact optimized-motion reference.
+                if(!request.plan.optimizationMetadata.empty()) {
+                    if(!motion_planning::prepareGaApfDownsamplingRequest(request,error))throw std::runtime_error(error);
+                } else {
+                request.plan.cartesianControlPoints.points.clear();
+                for(const auto& joint:request.plan.trajectory.points) {
+                    if(cancelled.load())return;
+                    if(!scene->setState(joint.q,&error))throw std::runtime_error(error);
+                    robottrajectory::TimedCartesianPoint point;point.time=joint.time;
+                    point.tcpPose=scene->linkWorldTransform(request.tcpLinkName)*request.linkFromTcp;
+                    request.plan.cartesianControlPoints.points.push_back(point);
+                }
+                }
+                result=motion_planning::ProjectExternalTrajectoryEvaluator::evaluate(document,basePath,request);
+                if(result.success) {
+                    auto replay=request;replay.pipelineStage="validate";replay.preferredOutputWaypoints=0;
+                    replay.verificationTrajectory=result.plan.trajectory;
+                    const auto checked=motion_planning::ProjectExternalTrajectoryEvaluator::evaluate(document,basePath,replay);
+                    if(!checked.success) {result.success=false;result.plan={};result.diagnostics=checked.diagnostics;}
+                }
+            } catch(const std::exception& error) {result.diagnostics.push_back({"downsampling_exception",error.what()});}
+            catch(...) {result.diagnostics.push_back({"downsampling_exception","Unexpected downsampling worker error."});}
+        }));
+        connect(worker.get(),&QThread::finished,&dialog,&QDialog::accept,Qt::QueuedConnection);
+        worker->start();dialog.exec();worker->wait();timer.stop();m_context.eventHub().unsubscribe(&dialog);
+        if(cancelled.load() || sourceChanged) {showResult(QStringLiteral("Downsampling cancelled; source trajectory retained."),false);return;}
+        if(!result.success) {
+            showResult(result.diagnostics.empty()?QStringLiteral("No verified export available; source trajectory retained."):
+                QString::fromStdString(result.diagnostics.back().message),false);return;
+        }
+        std::string tcp,error;
+        if(!motion_planning::ProjectTrajectoryControlPointEditor::serializeCartesianMatrices(result.plan,tcp,&error)) {
+            showResult(QString::fromStdString(error),false);return;
+        }
+        QString path=getSaveFileName(QStringLiteral("motionPlanning.cdfDownsample.save"),&m_widget,
+            QStringLiteral("\u5bfc\u51fa\u964d\u91c7\u6837\u8f68\u8ff9"),QStringLiteral("optimized_downsampled_tcp.txt"),
+            QStringLiteral("Text Files (*.txt);;All Files (*)"));
+        if(path.isEmpty())return;
+        if(!path.endsWith(QStringLiteral(".txt"),Qt::CaseInsensitive))path+=QStringLiteral(".txt");
+        nlohmann::json joints={{"joint_names",result.plan.jointNames},{"joint_unit","rad"},{"time_unit","s"},
+            {"joint_convention","runtime model"},{"interpolation","joint_linear"},{"target_points",targetPoints},
+            {"validation_joint_step_rad",request.validationJointStep},{"tcp_corridor_m",request.maximumTcpPositionDeviation},
+            {"orientation_corridor_rad",request.maximumTcpOrientationDeviation},{"points",nlohmann::json::array()}};
+        for(const auto& p:result.plan.trajectory.points)joints["points"].push_back({{"time_s",p.time},{"q_rad",p.q}});
+        const auto jointText=joints.dump(2);
+        const QString jointPath=path+QStringLiteral(".joints.json");
+        const auto write=[](const QString& name,const std::string& text,QString& error) {
+            QSaveFile file(name);
+            if(!file.open(QIODevice::WriteOnly | QIODevice::Text) || file.write(text.data(),qint64(text.size()))!=qint64(text.size()) || !file.commit()) {
+                error=file.errorString();return false;
+            }
+            return true;
+        };
+        QString ioError;
+        if(!write(jointPath,jointText,ioError) || !write(path,tcp,ioError)) {
+            showResult(QStringLiteral("Export incomplete: %1").arg(ioError),false);return;
+        }
+        const auto count=result.plan.trajectory.points.size();
+        showResult(QStringLiteral("\u5df2\u5bfc\u51fa %1 \u70b9\uff08\u76ee\u6807 %2\uff0c\u539f\u8f68\u8ff9 %3 \u70b9\uff09\u3002\n%4\n%5\n")
+            .arg(static_cast<qulonglong>(count)).arg(targetPoints)
+            .arg(static_cast<qulonglong>(request.verificationTrajectory.points.size())).arg(path,jointPath)+
+            (count>std::size_t(targetPoints)?QStringLiteral("\u4e3a\u4fdd\u6301\u5b89\u5168\u8fde\u63a5\u548c\u8fd0\u52a8\u9650\u4f4d\uff0c\u5df2\u4fdd\u7559\u5fc5\u8981\u70b9\u3002"):
+                QStringLiteral("\u65b0\u8fde\u63a5\u8fd0\u52a8\u5df2\u901a\u8fc7\u91c7\u6837\u6821\u9a8c\uff0c\u539f\u4f18\u5316\u8f68\u8ff9\u4fdd\u7559\u3002")),true);
     }
 
     void MotionPlanningModuleController::exportCdfRapid()

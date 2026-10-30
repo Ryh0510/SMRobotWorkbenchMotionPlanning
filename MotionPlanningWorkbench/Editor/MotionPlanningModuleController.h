@@ -92,6 +92,7 @@ namespace robot_qt_viewer
         void repairImportedCdfTrajectory();
         void exportCdfTrajectory();
         void exportCdfTcpTrajectory();
+        void exportDownsampledCdfTrajectory(int targetPoints);
         void exportCdfRapid();
         void exportCdfFanuc();
         void clearCdfAnalysis();

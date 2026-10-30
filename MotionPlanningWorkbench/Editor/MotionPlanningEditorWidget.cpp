@@ -493,7 +493,7 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
             auto* low = new QDoubleSpinBox(&dialog);
             auto* high = new QDoubleSpinBox(&dialog);
             for(auto* box : {low, high}) { box->setRange(-3600, 3600); box->setDecimals(2); row->addWidget(box); }
-            low->setValue(-180); high->setValue(180);
+            low->setValue(-360); high->setValue(360);
             lows.push_back(low); highs.push_back(high);
             form->addRow(QStringLiteral("J%1 min / max (deg)").arg(j + 1), row);
         }
@@ -865,6 +865,24 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
     cdfLayout->addWidget(m_exportCdfTcpTrajectoryButton);
     connect(m_exportCdfTcpTrajectoryButton, &QPushButton::clicked,
         this, &MotionPlanningEditorWidget::exportCdfTcpTrajectoryRequested);
+    auto* downsampleForm = new QFormLayout();
+    m_cdfDownsampleTarget = new QSpinBox(cdfPage);
+    m_cdfDownsampleTarget->setObjectName(QStringLiteral("cdfDownsampleTargetPoints"));
+    m_cdfDownsampleTarget->setRange(2, 1000000);
+    m_cdfDownsampleTarget->setValue(4000);
+    m_cdfDownsampleTarget->setToolTip(QStringLiteral("\u76ee\u6807\u70b9\u6570\u662f\u8f6f\u76ee\u6807\uff0c\u5b89\u5168\u8fde\u63a5\u6240\u9700\u7684\u70b9\u4f1a\u4fdd\u7559\u3002"));
+    downsampleForm->addRow(QStringLiteral("\u964d\u91c7\u6837\u76ee\u6807\u70b9\u6570"), m_cdfDownsampleTarget);
+    cdfLayout->addLayout(downsampleForm);
+    m_exportDownsampledCdfButton = new QPushButton(QStringLiteral("\u964d\u91c7\u6837\u5bfc\u51fa\u8f68\u8ff9\u70b9..."), cdfPage);
+    m_exportDownsampledCdfButton->setObjectName(QStringLiteral("exportDownsampledCdfTrajectory"));
+    m_exportDownsampledCdfButton->setToolTip(QStringLiteral(
+        "Check all new joint-linear connections with collisions and virtual baffles. "
+        "Preserve the source trajectory and necessary safe bends. "
+        "Export world TCP matrices (mm) and the exact validated runtime joints."));
+    cdfLayout->addWidget(m_exportDownsampledCdfButton);
+    connect(m_exportDownsampledCdfButton, &QPushButton::clicked, this, [this]() {
+        emit exportDownsampledCdfTrajectoryRequested(m_cdfDownsampleTarget->value());
+    });
     m_exportCdfRapidButton = new QPushButton(QStringLiteral("\u5bfc\u51fa CDF RAPID \u7a0b\u5e8f\uff08.mod\uff09..."), cdfPage);
     m_exportCdfRapidButton->setObjectName(QStringLiteral("exportCdfRapid"));
     m_exportCdfRapidButton->setToolTip(QStringLiteral("\u6309 MainModule.mod \u6a21\u677f\u5bfc\u51fa\u5168\u90e8 CDF TCP \u76ee\u6807\u5750\u6807\uff0c\u56fa\u5b9a\u4f7f\u7528 MoveL/v50/z10/tool0 \u548c wobj0\uff0c\u4e0d\u8f93\u51fa\u81ea\u5b9a\u4e49\u5de5\u5177\u3002tool0 \u5c06\u8fd9\u4e9b\u5750\u6807\u89e3\u91ca\u4e3a\u6cd5\u5170\u76ee\u6807\uff1b\u672a\u81ea\u52a8\u8865\u507f\u55b7\u67aa\u504f\u7f6e\u3002"));
@@ -1603,6 +1621,11 @@ void MotionPlanningEditorWidget::updateCdfActions()
     }
     if(m_exportCdfTcpTrajectoryButton) {
         m_exportCdfTcpTrajectoryButton->setEnabled(hasRobot && m_cdfExportAvailable && !m_playbackActive);
+    }
+    if(m_exportDownsampledCdfButton) {
+        const bool enabled=hasRobot && m_cdfExportAvailable && !m_playbackActive;
+        m_exportDownsampledCdfButton->setEnabled(enabled);
+        m_cdfDownsampleTarget->setEnabled(enabled);
     }
     if(m_exportCdfRapidButton) {
         m_exportCdfRapidButton->setEnabled(hasRobot && m_cdfExportAvailable && !m_playbackActive);
