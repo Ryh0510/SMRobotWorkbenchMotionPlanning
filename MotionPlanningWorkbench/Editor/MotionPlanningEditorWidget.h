@@ -190,7 +190,6 @@ signals:
     void exportCdfQualityRequested();
     void exportCdfTrajectoryRequested();
     void exportCdfTcpTrajectoryRequested();
-    void exportDownsampledCdfTrajectoryRequested(int targetPoints);
     void exportCdfRapidRequested();
     void exportCdfFanucRequested();
     void insertControlPointBeforeRequested(int pointIndex);
@@ -299,8 +298,6 @@ private:
     QPushButton* m_exportCdfRapidButton = nullptr;
     QPushButton* m_exportCdfFanucButton = nullptr;
     QPushButton* m_exportCdfTcpTrajectoryButton = nullptr;
-    QSpinBox* m_cdfDownsampleTarget = nullptr;
-    QPushButton* m_exportDownsampledCdfButton = nullptr;
     QLabel* m_cdfResult = nullptr;
     QComboBox* m_cdfStageCombo = nullptr;
     QTableWidget* m_cdfStageTable = nullptr;

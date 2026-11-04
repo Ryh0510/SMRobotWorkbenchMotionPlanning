@@ -23,6 +23,7 @@ namespace motion_planning
     struct StoredMotionPlan;
     struct ProjectCdfQpRepairResult;
     class JointPlaybackTimeline;
+    class CartesianMotionSampler;
     struct CartesianMultiIkResult;
     struct LayeredIkGraphResult;
     class ProjectPlanningSceneSnapshot;
@@ -92,7 +93,6 @@ namespace robot_qt_viewer
         void repairImportedCdfTrajectory();
         void exportCdfTrajectory();
         void exportCdfTcpTrajectory();
-        void exportDownsampledCdfTrajectory(int targetPoints);
         void exportCdfRapid();
         void exportCdfFanuc();
         void clearCdfAnalysis();
@@ -175,6 +175,7 @@ namespace robot_qt_viewer
         QString m_distanceRecordedAt;
         bool m_distanceBusy = false;
         std::unique_ptr<motion_planning::JointPlaybackTimeline> m_playbackTimeline;
+        std::shared_ptr<const motion_planning::CartesianMotionSampler> m_playbackMoveL;
         QElapsedTimer m_playbackClock;
         qint64 m_playbackLastTickNs = 0;
         quint64 m_playbackFrameTicket = 0;
