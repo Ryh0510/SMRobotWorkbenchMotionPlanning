@@ -25,6 +25,7 @@
 #include <ProjectMotionPlanning/TrajectoryControlPointEditing.h>
 #include <ProjectMotionPlanning/TrajectoryImport.h>
 #include <ProjectMotionPlanning/TrajectoryInverseKinematics.h>
+#include <ProjectMotionPlanning/XyzrKinematics.h>
 #include <ProjectMotionPlanning/LayeredIkGraph.h>
 #include <ProjectMotionPlanning/RapidTrajectoryExport.h>
 #include <ProjectMotionPlanning/FanucTrajectoryExport.h>
@@ -98,7 +99,7 @@ namespace
 
     std::vector<std::string> selectedRobotJointNames(
         const simulation_project::ProjectDocument& document,
-        const QString& robotId)
+        const QString& robotId, const std::filesystem::path& basePath = {})
     {
         const auto robotIt = std::find_if(
             document.robots.begin(),
@@ -120,6 +121,12 @@ namespace
              robotIt->sourcePath.find("4600") != std::string::npos ||
              robotIt->id.find("4600") != std::string::npos)) {
             names = motion_planning::ProjectTrajectoryInverseKinematics::defaultIrb4600JointNames();
+        }
+        if(names.empty() || names.size()==4) {
+            std::string error;
+            const auto xyzr=motion_planning::XyzrKinematics::create(document,basePath,robotId.toStdString(),
+                motion_planning::CartesianIkToolMode::FixedTool,error);
+            if(xyzr)names=xyzr->jointNames();
         }
         return names;
     }
@@ -618,6 +625,10 @@ namespace robot_qt_viewer
             return;
         }
 
+        // The default CDF fixture belongs to the six-axis workflow. Explicit
+        // scene detectors are still queried during four-axis playback.
+        if(selectedRobotJointNames(m_context.document(),cdfRobotId,
+            projectBasePath(m_context.projectSession())).size()==4)return;
         const std::string robotId = cdfRobotId.toStdString();
         if(cdfDetectorIsConfigured(m_context.document(), robotId, options)) {
             return;
@@ -971,7 +982,7 @@ namespace robot_qt_viewer
 
         motion_planning::TrajectoryImportOptions options;
         options.robotId = m_selectedRobotId.toStdString();
-        options.jointNames = selectedRobotJointNames(m_context.document(), m_selectedRobotId);
+        options.jointNames = selectedRobotJointNames(m_context.document(), m_selectedRobotId, projectBasePath(m_context.projectSession()));
 
         const motion_planning::TrajectoryImportResult importResult =
             motion_planning::ProjectTrajectoryImporter::importFile(
@@ -1194,7 +1205,7 @@ namespace robot_qt_viewer
         auto exactPlan = importResult.plan;
         if(importResult.hasMotionMetadata &&
             (exactPlan.robotId != m_selectedRobotId.toStdString() ||
-             exactPlan.jointNames != selectedRobotJointNames(m_context.document(), m_selectedRobotId) ||
+             exactPlan.jointNames != selectedRobotJointNames(m_context.document(), m_selectedRobotId, projectBasePath(m_context.projectSession())) ||
              !normalizeImportedJointTable(exactPlan, usesIrb4600RobotSystemJointSigns(m_context.document(), m_selectedRobotId)))) {
             m_widget.setCdfResult(QStringLiteral("Joint table robot, joint group or convention does not match."), false);
             return;
@@ -1259,9 +1270,10 @@ namespace robot_qt_viewer
             return;
         }
 
+        std::shared_ptr<const motion_planning::XyzrKinematics> xyzrModel;
         motion_planning::CartesianIkOptions options;
         options.robotId = m_selectedRobotId.toStdString();
-        options.jointNames = selectedRobotJointNames(m_context.document(), m_selectedRobotId);
+        options.jointNames = selectedRobotJointNames(m_context.document(), m_selectedRobotId, projectBasePath(m_context.projectSession()));
         options.toolMode = useToolTransform
             ? motion_planning::CartesianIkToolMode::FixedTool
             : motion_planning::CartesianIkToolMode::Flange;
@@ -1285,40 +1297,48 @@ namespace robot_qt_viewer
             }
         }
 
-        auto* viewportServices = m_context.motionPlanningViewport();
-        const auto runtimeFk = viewportServices
-            ? viewportServices->robotForwardKinematics(m_selectedRobotId, options.jointNames, useToolTransform)
-            : IRobotQtViewerMotionPlanningViewportPort::RobotForwardKinematics{};
-        if(!runtimeFk) {
-            m_widget.setResult(QStringLiteral("Cannot obtain the selected robot model and TCP for IK."), false);
-            return;
+        std::string modelError;
+        if(options.jointNames.size()==4 || options.jointNames.empty()) {
+            xyzrModel=motion_planning::XyzrKinematics::create(m_context.document(),
+                projectBasePath(m_context.projectSession()),options.robotId,options.toolMode,modelError);
+            if(!xyzrModel) {
+                m_widget.setResult(QString::fromStdString(modelError.empty() ? "Unsupported four-axis robot model." : modelError),false);
+                return;
+            }
+            options.jointNames=xyzrModel->jointNames();
+            // Seed values are keyed by the actual model order, not saved initialJoints order.
+            options.seedJoints.clear();
+            if(auto* services=m_context.motionPlanningViewport())for(const auto& name:options.jointNames) {
+                bool ok=false;const double value=services->robotJointValue(m_selectedRobotId,QString::fromStdString(name),&ok);
+                if(!ok){options.seedJoints.clear();break;}options.seedJoints.push_back(value);
+            }
+        } else {
+            auto* viewportServices = m_context.motionPlanningViewport();
+            const auto runtimeFk = viewportServices
+                ? viewportServices->robotForwardKinematics(m_selectedRobotId, options.jointNames, useToolTransform)
+                : IRobotQtViewerMotionPlanningViewportPort::RobotForwardKinematics{};
+            if(!runtimeFk) {
+                m_widget.setResult(QStringLiteral("Cannot obtain the selected robot model and TCP for IK."), false);
+                return;
+            }
+            const bool mapSigns = usesIrb4600RobotSystemJointSigns(m_context.document(), m_selectedRobotId);
+            if(mapSigns) {
+                options.seedJoints = motion_planning::ProjectTrajectoryInverseKinematics::irb4600RobotSystemJointValues(
+                    options.seedJoints);
+            }
+            // Basic single-solution IK intentionally ignores position limits.
+            // All IK and collision/planning services retain their own physical bounds.
+            options.mapIrb4600StoredJointSigns=mapSigns;
+            options.worldForwardKinematics = [runtimeFk, mapSigns](const std::vector<double>& joints) {
+                return runtimeFk(mapSigns
+                    ? motion_planning::ProjectTrajectoryInverseKinematics::irb4600RobotSystemJointValues(joints)
+                    : joints);
+            };
         }
-        const bool mapSigns = usesIrb4600RobotSystemJointSigns(m_context.document(), m_selectedRobotId);
-        if(mapSigns) {
-            options.seedJoints = motion_planning::ProjectTrajectoryInverseKinematics::irb4600RobotSystemJointValues(
-                options.seedJoints);
-        }
-        std::string boundsError;
-        if(!motion_planning::ProjectTrajectoryInverseKinematics::readRevoluteJointLimits(
-            m_context.document(), projectBasePath(m_context.projectSession()), options.robotId,
-            options.jointNames, options.lower, options.upper, boundsError)) {
-            m_widget.setResult(QString::fromStdString(boundsError), false);
-            return;
-        }
-        if(mapSigns) {
-            const auto a=motion_planning::ProjectTrajectoryInverseKinematics::irb4600RobotSystemJointValues(options.lower);
-            const auto b=motion_planning::ProjectTrajectoryInverseKinematics::irb4600RobotSystemJointValues(options.upper);
-            for(std::size_t j=0;j<a.size();++j){options.lower[j]=std::min(a[j],b[j]);options.upper[j]=std::max(a[j],b[j]);}
-        }
-        options.mapIrb4600StoredJointSigns=mapSigns;
-        options.worldForwardKinematics = [runtimeFk, mapSigns](const std::vector<double>& joints) {
-            return runtimeFk(mapSigns
-                ? motion_planning::ProjectTrajectoryInverseKinematics::irb4600RobotSystemJointValues(joints)
-                : joints);
-        };
         stopJointPlayback();
-        const motion_planning::CartesianIkResult ikResult =
-            motion_planning::ProjectTrajectoryInverseKinematics::solveCartesianControlPoints(
+        const motion_planning::CartesianIkResult ikResult = xyzrModel
+            ? xyzrModel->solve(*planIt,options)
+            : motion_planning::ProjectTrajectoryInverseKinematics::solveCartesianControlPoints(
                 m_context.document(),
                 *planIt,
                 options);
@@ -1372,7 +1392,7 @@ namespace robot_qt_viewer
         m_widget.setResult(summary, true);
         emit trajectoryPlanned(QString::fromStdString(solvedPlan.id));
         emit statusMessageRequested(summary, 5000);
-        setCdfSeedFromPlan(solvedPlan);
+        if(!xyzrModel)setCdfSeedFromPlan(solvedPlan);
     }
 
     void MotionPlanningModuleController::applySelectedJointPoint(int pointIndex)
@@ -1431,7 +1451,7 @@ namespace robot_qt_viewer
         }
 
         const std::vector<std::string> robotJointNames =
-            selectedRobotJointNames(m_context.document(), m_selectedRobotId);
+            selectedRobotJointNames(m_context.document(), m_selectedRobotId, projectBasePath(m_context.projectSession()));
         if(robotJointNames.size() != m_cdfJointPoints[index].jointAnglesDegrees.size()) {
             const QString message = QStringLiteral("CDF joint angle count (%1) does not match robot joint count (%2).")
                 .arg(static_cast<int>(m_cdfJointPoints[index].jointAnglesDegrees.size()))
@@ -1475,7 +1495,7 @@ namespace robot_qt_viewer
         stopJointPlayback();
 
         const std::vector<std::string> robotJointNames =
-            selectedRobotJointNames(m_context.document(), m_selectedRobotId);
+            selectedRobotJointNames(m_context.document(), m_selectedRobotId, projectBasePath(m_context.projectSession()));
         if(robotJointNames.empty()) {
             m_widget.setCdfResult(QStringLiteral("Selected robot has no movable joints for CDF/QP repair."), false);
             return;
@@ -2425,7 +2445,19 @@ namespace robot_qt_viewer
         }
 
         m_playbackMoveL.reset();
-        if(motion_planning::CartesianMotionSampler::isMoveL(*selectedPlan)) {
+        m_playbackXyzr.reset();
+        const auto ikMetadata=nlohmann::json::parse(selectedPlan->optimizationMetadata,nullptr,false);
+        const bool xyzrPlan=ikMetadata.is_object() && ikMetadata.value("ik_solver",std::string())=="xyzr_analytic_v1";
+        if(xyzrPlan) {
+            std::string error;
+            const auto toolMode=ikMetadata.value("xyzr_tool_mode",std::string())=="flange"
+                ? motion_planning::CartesianIkToolMode::Flange : motion_planning::CartesianIkToolMode::FixedTool;
+            m_playbackXyzr=motion_planning::XyzrKinematics::create(m_context.document(),
+                projectBasePath(m_context.projectSession()),selectedPlan->robotId,toolMode,error);
+            if(!m_playbackXyzr || m_playbackXyzr->jointNames()!=selectedPlan->jointNames) {
+                stopJointPlayback();m_widget.setResult(QString::fromStdString("XYZR playback unavailable: "+error),false);return;
+            }
+        } else if(motion_planning::CartesianMotionSampler::isMoveL(*selectedPlan)) {
             std::string link,error;Eigen::Isometry3d tcp;
             if(!m_playbackCollisionScene || !motion_planning::resolvePlanningTcp(m_context.document(),selectedPlan->robotId,link,tcp,error) ||
                 !(m_playbackMoveL=motion_planning::CartesianMotionSampler::create(*m_playbackCollisionScene,link,tcp,error))) {
@@ -2487,6 +2519,7 @@ namespace robot_qt_viewer
         m_cdfStagePlayback.reset();
         m_playbackPlan.reset();
         m_playbackMoveL.reset();
+        m_playbackXyzr.reset();
         m_widget.setNearestDistanceAvailable(m_playbackCollisionScene && !m_distanceRuntimePoints.empty());
         m_playbackFrameTicket = 0;
     }
@@ -2574,7 +2607,7 @@ namespace robot_qt_viewer
         }
         m_playbackTimeSeconds = displayTime;
         auto displayJoints = m_playbackTimeline->sample(trajectory, displayTime);
-        if(m_playbackMoveL && trajectory.points.size()>1) {
+        if((m_playbackMoveL || m_playbackXyzr) && trajectory.points.size()>1) {
             std::size_t right=1;
             while(right+1<trajectory.points.size() && m_playbackTimeline->pointTime(right)<displayTime)++right;
             const double begin=m_playbackTimeline->pointTime(right-1),end=m_playbackTimeline->pointTime(right);
@@ -2583,7 +2616,8 @@ namespace robot_qt_viewer
             const auto from=maybeMapIrb4600JointSigns(m_context.document(),m_selectedRobotId,trajectory.points[right-1].q);
             const auto to=maybeMapIrb4600JointSigns(m_context.document(),m_selectedRobotId,trajectory.points[right].q);
             std::vector<double> runtimeDisplay;
-            if(!m_playbackMoveL->sample(from,to,fraction,runtimeDisplay,error)) {
+            if(!(m_playbackXyzr ? m_playbackXyzr->sample(from,to,fraction,runtimeDisplay,error)
+                : m_playbackMoveL->sample(from,to,fraction,runtimeDisplay,error))) {
                 stopJointPlayback();m_widget.setResult(QString::fromStdString(error),false);return;
             }
             displayJoints=maybeMapIrb4600JointSigns(m_context.document(),m_selectedRobotId,runtimeDisplay);
@@ -2643,7 +2677,7 @@ namespace robot_qt_viewer
         }
         QStringList names;
         QStringList values;
-        for(const auto& jointName : selectedRobotJointNames(document, robotId)) {
+        for(const auto& jointName : selectedRobotJointNames(document, robotId, projectBasePath(m_context.projectSession()))) {
             names.push_back(QString::fromStdString(jointName));
             const auto saved = std::find_if(robotIt->initialJoints.begin(), robotIt->initialJoints.end(),
                 [&](const auto& joint) { return joint.jointName == jointName; });
@@ -3283,7 +3317,7 @@ namespace robot_qt_viewer
         }
         motion_planning::CartesianMultiIkOptions options;
         options.model.robotId = m_selectedRobotId.toStdString();
-        options.model.jointNames = selectedRobotJointNames(m_context.document(), m_selectedRobotId);
+        options.model.jointNames = selectedRobotJointNames(m_context.document(), m_selectedRobotId, projectBasePath(m_context.projectSession()));
         if(options.model.jointNames.size() != 6 || lowerDegrees.size() != 6 || upperDegrees.size() != 6) {
             m_widget.setResult(QStringLiteral("Multi IK requires six revolute joints and six search ranges."), false); return;
         }
@@ -3603,7 +3637,7 @@ namespace robot_qt_viewer
             m_widget.setCdfResult(QString::fromStdString(error), false); return;
         }
         if(selected.robotId != m_selectedRobotId.toStdString() ||
-            selected.jointNames != selectedRobotJointNames(m_context.document(), m_selectedRobotId)) {
+            selected.jointNames != selectedRobotJointNames(m_context.document(), m_selectedRobotId, projectBasePath(m_context.projectSession()))) {
             m_widget.setCdfResult(QStringLiteral("Robot/joint order changed; regenerate IK before using this seed."), false); return;
         }
         stopJointPlayback();

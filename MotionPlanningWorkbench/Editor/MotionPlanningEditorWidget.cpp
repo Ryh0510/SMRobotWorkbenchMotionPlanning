@@ -471,6 +471,7 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
     layout->addLayout(ikForm);
 
     m_solveIkButton = new QPushButton(QStringLiteral("Solve IK and apply"), this);
+    m_solveIkButton->setToolTip(QStringLiteral("Six-axis single-solution IK ignores joint position limits. All IK retains the model limits and selected search ranges."));
     layout->addWidget(m_solveIkButton);
 
     m_allIkButton = new QPushButton(QStringLiteral("\u5168\u9006\u89e3"), basicPage);

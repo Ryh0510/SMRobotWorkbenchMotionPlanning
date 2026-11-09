@@ -24,6 +24,7 @@ namespace motion_planning
     struct ProjectCdfQpRepairResult;
     class JointPlaybackTimeline;
     class CartesianMotionSampler;
+    class XyzrKinematics;
     struct CartesianMultiIkResult;
     struct LayeredIkGraphResult;
     class ProjectPlanningSceneSnapshot;
@@ -176,6 +177,7 @@ namespace robot_qt_viewer
         bool m_distanceBusy = false;
         std::unique_ptr<motion_planning::JointPlaybackTimeline> m_playbackTimeline;
         std::shared_ptr<const motion_planning::CartesianMotionSampler> m_playbackMoveL;
+        std::shared_ptr<const motion_planning::XyzrKinematics> m_playbackXyzr;
         QElapsedTimer m_playbackClock;
         qint64 m_playbackLastTickNs = 0;
         quint64 m_playbackFrameTicket = 0;
