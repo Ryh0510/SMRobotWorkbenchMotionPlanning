@@ -705,6 +705,12 @@ MotionPlanningEditorWidget::MotionPlanningEditorWidget(QWidget* parent)
     connect(m_graphUse, &QPushButton::clicked, this,
         [this]() { emit useLayeredGraphResultRequested(activeGraphTable()->currentRow(), m_graphResultTabs->currentIndex() == 1); });
 
+    auto* collisionConditions = new QPushButton(QStringLiteral("碰撞检测条件..."), basicPage);
+    collisionConditions->setObjectName(QStringLiteral("motionPlanningCollisionConditions"));
+    collisionConditions->setToolTip(QStringLiteral("从全局场景选择已有检测器，或为当前机器人和工件创建检测器。"));
+    layout->addWidget(collisionConditions);
+    connect(collisionConditions, &QPushButton::clicked, this, &MotionPlanningEditorWidget::collisionConditionsRequested);
+
     m_sprayRangeVisible = new QCheckBox(QStringLiteral("Show spray range"), basicPage);
     layout->addWidget(m_sprayRangeVisible);
 

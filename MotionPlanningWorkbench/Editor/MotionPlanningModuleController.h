@@ -121,7 +121,11 @@ namespace robot_qt_viewer
         void clearSprayMeasurements();
         void setSelectedTrajectory(const QString& trajectoryId);
         void setSelectedRobot(const QString& robotId);
-        void ensurePersistentCdfCollisionSetup();
+        bool ensureCollisionConditions(bool requireSprayTarget = false, bool forceDialog = false);
+        std::vector<std::string> m_collisionDetectorIds;
+        QString m_collisionRobotId;
+        QString m_sprayTargetId;
+        QString m_recordedSprayTargetId;
         void refreshTrajectoryView();
         std::string m_segmentSourceFingerprint;
         void segmentTrajectory(double angle, double minimumMm);

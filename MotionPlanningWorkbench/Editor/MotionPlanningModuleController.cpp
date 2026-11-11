@@ -32,6 +32,12 @@
 #include <SimulationProject/ProjectDocumentService.h>
 #include <SimulationProject/RuntimePaths.h>
 
+#include <QComboBox>
+#include <QCheckBox>
+#include <QDialogButtonBox>
+#include <QFormLayout>
+#include <QListWidget>
+#include <QUuid>
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDialog>
@@ -129,26 +135,6 @@ namespace
             if(xyzr)names=xyzr->jointNames();
         }
         return names;
-    }
-
-    bool cdfDetectorIsConfigured(const simulation_project::ProjectDocument& document,
-        const std::string& robotId,const motion_planning::ProjectCdfQpRepairOptions& options)
-    {
-        return motion_planning::ProjectCdfQpTrajectoryRepairService::collisionSetupConfigured(document,robotId,options);
-    }
-
-    motion_planning::ProjectCdfQpRepairOptions robotCollisionOptions(const QString& robot)
-    {
-        motion_planning::ProjectCdfQpRepairOptions options;
-        if(robot != QStringLiteral("ABB4600_urdf"))
-            options.detectorId="cdf_"+robot.toStdString()+"_A";
-        return options;
-    }
-
-    std::vector<std::string> playbackCollisionDetectorIds(
-        const simulation_project::ProjectDocument& document,const QString& robotId)
-    {
-        return motion_planning::ProjectCdfQpTrajectoryRepairService::distanceDetectorIds(document,robotId.toStdString());
     }
 
     bool usesIrb4600RobotSystemJointSigns(
@@ -598,6 +584,9 @@ namespace robot_qt_viewer
             this, &MotionPlanningModuleController::setSprayMeasurementEnabled);
         connect(&m_widget, &MotionPlanningEditorWidget::exportSprayMeasurementsRequested,
             this, &MotionPlanningModuleController::exportSprayMeasurements);
+        connect(&m_widget, &MotionPlanningEditorWidget::collisionConditionsRequested, this, [this]() {
+            ensureCollisionConditions(m_sprayMeasurementEnabled, true);
+        });
         connect(&m_widget, &MotionPlanningEditorWidget::plotSprayMeasurementsRequested,
             this, &MotionPlanningModuleController::plotSprayMeasurements);
         connect(&m_widget, &MotionPlanningEditorWidget::trajectorySelectionChanged,
@@ -605,7 +594,6 @@ namespace robot_qt_viewer
         connect(m_playbackTimer, &QTimer::timeout,
             this, &MotionPlanningModuleController::advanceJointPlayback);
         setSelectedRobot(m_context.selectionModel().state().robotId);
-        ensurePersistentCdfCollisionSetup();
         refreshTrajectoryView();
     }
 
@@ -617,52 +605,132 @@ namespace robot_qt_viewer
         if(m_graphThread) { m_graphThread->wait(); }
     }
 
-    void MotionPlanningModuleController::ensurePersistentCdfCollisionSetup()
+    bool MotionPlanningModuleController::ensureCollisionConditions(bool requireSprayTarget, bool forceDialog)
     {
-        const auto options = robotCollisionOptions(m_selectedRobotId);
-        const QString cdfRobotId = m_selectedRobotId;
-        if(cdfRobotId.isEmpty()) {
-            return;
+        if(m_selectedRobotId.isEmpty()) {
+            m_widget.setResult(QStringLiteral("请先选择需要规划的机器人。"), false); return false;
         }
-
-        // The default CDF fixture belongs to the six-axis workflow. Explicit
-        // scene detectors are still queried during four-axis playback.
-        if(selectedRobotJointNames(m_context.document(),cdfRobotId,
-            projectBasePath(m_context.projectSession())).size()==4)return;
-        const std::string robotId = cdfRobotId.toStdString();
-        if(cdfDetectorIsConfigured(m_context.document(), robotId, options)) {
-            return;
+        if(m_playbackPlan || m_distanceBusy) {
+            emit statusMessageRequested(QStringLiteral("请先停止播放或等待距离查询完成，再设置碰撞检测条件。"), 5000); return false;
         }
+        const auto targetExists = [&](const QString& id) {
+            const auto& document = m_context.document();
+            return std::any_of(document.objects.begin(), document.objects.end(),
+                [&](const auto& value) { return value.id == id.toStdString(); }) ||
+                std::any_of(document.robots.begin(), document.robots.end(),
+                [&](const auto& value) { return value.id == id.toStdString() && id != m_selectedRobotId; });
+        };
+        motion_planning::ProjectCdfQpRepairOptions selected;
+        selected.detectorIds = m_collisionDetectorIds;
+        if(!forceDialog && m_collisionRobotId == m_selectedRobotId && !selected.detectorIds.empty() &&
+            motion_planning::ProjectCdfQpTrajectoryRepairService::collisionSetupConfigured(
+                m_context.document(), m_selectedRobotId.toStdString(), selected) &&
+            (!requireSprayTarget || targetExists(m_sprayTargetId))) return true;
 
-        std::vector<motion_planning::MotionPlanningDiagnostic> setupDiagnostics;
-        const ProjectMutationResult setupMutation = m_context.documentController().mutateProject(
-            QStringLiteral("motionPlanningPersistentCdfCollisionSetup"),
-            ProjectDirtyPolicy::UserEdit,
-            [&](simulation_project::ProjectDocumentService& service, bool& changed, std::string& error) {
-                if(cdfDetectorIsConfigured(service.document(), robotId, options)) {
-                    changed = false;
-                    return true;
+        QDialog dialog(&m_widget);
+        dialog.setObjectName(QStringLiteral("motionPlanningCollisionDialog"));
+        dialog.setWindowTitle(QStringLiteral("运动规划碰撞检测条件 - %1").arg(m_selectedRobotId));
+        auto* layout = new QVBoxLayout(&dialog);
+        auto* info = new QLabel(QStringLiteral("选择当前机器人已配置的检测器，或选择场景工件创建一个新检测器。\n新建检测器包含机器人本体及所有已启用的挂载工具；目标为另一机器人时也包含其挂载工具。\n已有检测器可多选，需共同覆盖当前机器人的挂载工具，并启用距离和最近点查询；沿用场景的碰撞模型与过滤规则。"), &dialog);
+        info->setWordWrap(true); layout->addWidget(info);
+        auto* create = new QCheckBox(QStringLiteral("创建新检测器"), &dialog);
+        create->setObjectName(QStringLiteral("createPlanningCollisionDetector")); layout->addWidget(create);
+        auto* detectors = new QListWidget(&dialog);
+        detectors->setObjectName(QStringLiteral("planningCollisionDetectors"));
+        detectors->setSelectionMode(QAbstractItemView::ExtendedSelection);
+        auto queryDocument = m_context.document();
+        queryDocument.collision.query.enabled = true;
+        const auto available = motion_planning::ProjectCdfQpTrajectoryRepairService::distanceDetectorIds(
+            queryDocument, m_selectedRobotId.toStdString());
+        for(const auto& detector : queryDocument.collision.detectors) {
+            if(std::find(available.begin(), available.end(), detector.id) == available.end()) continue;
+            auto* item = new QListWidgetItem(QString::fromStdString(detector.name + " [" + detector.id + "]"), detectors);
+            item->setData(Qt::UserRole, QString::fromStdString(detector.id));
+            item->setSelected(m_collisionRobotId == m_selectedRobotId &&
+                std::find(m_collisionDetectorIds.begin(), m_collisionDetectorIds.end(), detector.id) != m_collisionDetectorIds.end());
+        }
+        layout->addWidget(detectors);
+        auto* form = new QFormLayout;
+        auto* target = new QComboBox(&dialog);
+        target->setObjectName(QStringLiteral("planningCollisionTarget"));
+        target->addItem(QStringLiteral("请选择场景工件"), QString());
+        for(const auto& object : queryDocument.objects)
+            target->addItem(QString::fromStdString(object.name + " [" + object.id + "]"), QString::fromStdString(object.id));
+        for(const auto& robot : queryDocument.robots) if(robot.id != m_selectedRobotId.toStdString())
+            target->addItem(QString::fromStdString(robot.name + " [" + robot.id + "]"), QString::fromStdString(robot.id));
+        const int previous = target->findData(m_sprayTargetId);
+        if(previous > 0) target->setCurrentIndex(previous);
+        form->addRow(QStringLiteral("新检测器 / 喷涂测量工件"), target); layout->addLayout(form);
+        auto* enable = new QCheckBox(QStringLiteral("启用全局碰撞查询"), &dialog);
+        enable->setObjectName(QStringLiteral("enablePlanningCollisionQueries"));
+        enable->setChecked(m_context.document().collision.query.enabled);
+        layout->addWidget(enable);
+        auto* error = new QLabel(&dialog); error->setWordWrap(true); layout->addWidget(error);
+        auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+        layout->addWidget(buttons);
+        connect(create, &QCheckBox::toggled, detectors, &QWidget::setDisabled);
+        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        connect(buttons, &QDialogButtonBox::accepted, &dialog, [&]() {
+            if(!enable->isChecked()) { error->setText(QStringLiteral("请先启用全局碰撞查询。")); return; }
+            if(!create->isChecked() && detectors->selectedItems().isEmpty()) {
+                error->setText(QStringLiteral("请选择至少一个已有检测器，或勾选创建新检测器。")); return;
+            }
+            if((create->isChecked() || requireSprayTarget) && target->currentData().toString().isEmpty()) {
+                error->setText(QStringLiteral("请选择场景中的目标工件。")); return;
+            }
+            if(!create->isChecked()) {
+                motion_planning::ProjectCdfQpRepairOptions candidate;
+                for(auto* item : detectors->selectedItems())
+                    candidate.detectorIds.push_back(item->data(Qt::UserRole).toString().toStdString());
+                if(!motion_planning::ProjectCdfQpTrajectoryRepairService::collisionSetupConfigured(
+                    queryDocument, m_selectedRobotId.toStdString(), candidate)) {
+                    error->setText(QStringLiteral("所选检测器未覆盖全部已启用的挂载工具，或检测条件已失效。请补选工具检测器，或创建包含本体和工具的新检测器。"));
+                    return;
                 }
+            }
+            dialog.accept();
+        });
+        dialog.resize(620, 420);
+        if(dialog.exec() != QDialog::Accepted) return false;
 
-                std::string detectorId;
-                if(!motion_planning::ProjectCdfQpTrajectoryRepairService::ensureCollisionSetup(
-                       service.document(),
-                       robotId,
-                       options,
-                       &detectorId,
-                       &setupDiagnostics)) {
-                    error = setupDiagnostics.empty()
-                        ? std::string("Failed to configure the robot/A.STL collision detector; the target must exist in the scene.")
-                        : setupDiagnostics.front().message;
-                    return false;
-                }
-                changed = true;
-                return true;
-            });
-
-        if(!setupMutation.success) {
-            emit statusMessageRequested(setupMutation.message, 7000);
+        selected.detectorIds.clear();
+        for(auto* item : detectors->selectedItems()) selected.detectorIds.push_back(item->data(Qt::UserRole).toString().toStdString());
+        const auto robotId = m_selectedRobotId.toStdString();
+        const QString targetId = target->currentData().toString();
+        if(create->isChecked()) {
+            selected.detectorId = "planning_" + QUuid::createUuid().toString(QUuid::WithoutBraces).toStdString();
+            selected.obstacleId = targetId.toStdString();
+            selected.obstacleName = target->currentText().toStdString();
+            selected.detectorIds.clear();
         }
+        if(create->isChecked() || !m_context.document().collision.query.enabled) {
+            const auto mutation = m_context.documentController().mutateProject(
+                QStringLiteral("motionPlanningCollisionConditions"), ProjectDirtyPolicy::UserEdit,
+                [&](simulation_project::ProjectDocumentService& service, bool& changed, std::string& message) {
+                    service.document().collision.query.enabled = true;
+                    std::vector<motion_planning::MotionPlanningDiagnostic> diagnostics;
+                    if(!motion_planning::ProjectCdfQpTrajectoryRepairService::ensureCollisionSetup(
+                        service.document(), robotId, selected, nullptr, &diagnostics)) {
+                        message = diagnostics.empty() ? "Cannot configure collision conditions." : diagnostics.front().message;
+                        return false;
+                    }
+                    changed = true; return true;
+                });
+            if(!mutation.success) { m_widget.setResult(mutation.message, false); return false; }
+        }
+        if(create->isChecked()) selected.detectorIds = {selected.detectorId};
+        if(!motion_planning::ProjectCdfQpTrajectoryRepairService::collisionSetupConfigured(
+            m_context.document(), robotId, selected)) {
+            m_widget.setResult(QStringLiteral("所选检测器已失效，请重新设置碰撞检测条件。"), false); return false;
+        }
+        m_collisionDetectorIds = selected.detectorIds;
+        m_collisionRobotId = m_selectedRobotId;
+        m_sprayTargetId = targetId;
+        clearSprayMeasurements();
+        updateSprayMeasurement();
+        emit statusMessageRequested(QStringLiteral("碰撞检测条件已设置：%1 个检测器；测量工件：%2")
+            .arg(m_collisionDetectorIds.size()).arg(m_sprayTargetId), 6000);
+        return true;
     }
 
     void MotionPlanningModuleController::handleEvent(const RobotQtViewerEvent& event)
@@ -684,7 +752,7 @@ namespace robot_qt_viewer
                 event.sourceId != QStringLiteral("motionPlanningMultiIkApply") &&
                 event.sourceId != QStringLiteral("motionPlanningApplyJointPoint") &&
                 event.sourceId != QStringLiteral("motionPlanningApplyCdfJointAngles") &&
-                event.sourceId != QStringLiteral("motionPlanningPersistentCdfCollisionSetup"))) {
+                event.sourceId != QStringLiteral("motionPlanningCollisionConditions"))) {
             clearCdfAnalysis();
         }
         if(event.kind == RobotQtViewerEventKind::ProjectOpened ||
@@ -695,25 +763,27 @@ namespace robot_qt_viewer
              event.sourceId != QStringLiteral("motionPlanningMultiIkApply") &&
              event.sourceId != QStringLiteral("motionPlanningApplyJointPoint") &&
              event.sourceId != QStringLiteral("motionPlanningApplyCdfJointAngles") &&
-             event.sourceId != QStringLiteral("motionPlanningPersistentCdfCollisionSetup"))) {
+             event.sourceId != QStringLiteral("motionPlanningCollisionConditions"))) {
             stopJointPlayback();
             invalidateMultiIk();
         }
         if(event.kind == RobotQtViewerEventKind::SelectionChanged) {
-            // Picking a workpiece must not discard the robot receiving its path.
-            if(!event.selection.robotId.isEmpty() || !m_sharedDataSource ||
-                !m_sharedDataSource->snapshot().hasTrajectory())
+            // Workpiece/detector selection does not change the planning robot.
+            // Keep the task binding until another robot is selected or it is removed.
+            if(!event.selection.robotId.isEmpty() || std::none_of(m_context.document().robots.begin(),
+                m_context.document().robots.end(), [&](const auto& robot) { return robot.id == m_selectedRobotId.toStdString(); }))
                 setSelectedRobot(event.selection.robotId);
         } else if(event.kind == RobotQtViewerEventKind::ProjectOpened) {
+            m_collisionDetectorIds.clear(); m_collisionRobotId.clear(); m_sprayTargetId.clear();
             clearGraphCdfSeed();
             stopJointPlayback();
             clearSprayMeasurements();
             clearEndEffectorTrace();
             setSelectedRobot(m_context.selectionModel().state().robotId);
-            ensurePersistentCdfCollisionSetup();
             refreshTrajectoryView();
         } else if(event.kind == RobotQtViewerEventKind::ProjectDocumentChanged) {
             stopJointPlayback();
+            clearSprayMeasurements();
             setSprayRangeVisible(m_sprayRangeVisible);
             clearEndEffectorTrace();
             setEndEffectorTraceVisible(m_endEffectorTraceVisible);
@@ -1534,7 +1604,7 @@ namespace robot_qt_viewer
 
         const MotionPlanningEditorWidget::CdfQpRepairSettings settings =
             m_widget.cdfQpRepairSettings();
-        auto options=robotCollisionOptions(m_selectedRobotId);
+        motion_planning::ProjectCdfQpRepairOptions options;
         options.apfMaxTcpDeviation = settings.apfMaxTcpDeviation;
         const auto processSeed = cartesianInput ? *selectedSource :
             m_cdfSeedPlan ? *m_cdfSeedPlan : motion_planning::StoredMotionPlan{};
@@ -1555,7 +1625,7 @@ namespace robot_qt_viewer
             }
             options.obstacleId = sourceProcess.modelObjectId.toStdString();
             options.obstacleName = sourceProcess.modelName.toStdString();
-            options.detectorId = "cdf_shared_" + m_selectedRobotId.toStdString() + "_" + options.obstacleId;
+
         }
         options.safetyMargin = settings.safetyMargin;
         options.targetClearance = settings.targetClearance;
@@ -1576,27 +1646,10 @@ namespace robot_qt_viewer
             options.worldForwardKinematics = services->robotForwardKinematics(m_selectedRobotId, robotJointNames, true);
 
         const std::string robotId = m_selectedRobotId.toStdString();
-        if(!cdfDetectorIsConfigured(m_context.document(),robotId,options)) {
-            const auto setup = m_context.documentController().mutateProject(
-                QStringLiteral("motionPlanningPersistentCdfCollisionSetup"),ProjectDirtyPolicy::UserEdit,
-                [&](simulation_project::ProjectDocumentService& service,bool& changed,std::string& error) {
-                    std::vector<motion_planning::MotionPlanningDiagnostic> diagnostics;
-                    if(!motion_planning::ProjectCdfQpTrajectoryRepairService::ensureCollisionSetup(
-                        service.document(),robotId,options,nullptr,&diagnostics)) {
-                        error = diagnostics.empty() ? "Cannot configure source-workpiece collisions." : diagnostics.front().message;
-                        return false;
-                    }
-                    changed = true; return true;
-                });
-            if(!setup.success) { m_widget.setCdfResult(setup.message,false); return; }
+        if(!ensureCollisionConditions(false)) {
+            m_widget.setCdfResult(QStringLiteral("请先选择或创建可用的碰撞检测器。"), false); return;
         }
-        if(!cdfDetectorIsConfigured(m_context.document(), robotId, options)) {
-            const QString message = QStringLiteral(
-                "Robot/workpiece collision detector is not configured. Add the intended workpiece and enable collision queries.");
-            m_widget.setCdfResult(message, false);
-            emit statusMessageRequested(message, 7000);
-            return;
-        }
+        options.detectorIds = m_collisionDetectorIds;
 
         // Execute against a private immutable project snapshot. The modal task
         // window prevents concurrent user edits while still repainting/timing.
@@ -1704,7 +1757,7 @@ namespace robot_qt_viewer
                 request.plan=processSeed;
                 request.plan.robotId=robotId;request.plan.jointNames=robotJointNames;
                 request.plan.trajectory=seedTrajectory;
-                request.collisionDetectorIds=playbackCollisionDetectorIds(document,QString::fromStdString(robotId));
+                request.collisionDetectorIds=options.detectorIds;
                 request.cdfOptions=options;request.progress=options.progress;request.cancelled=options.cancelled;
                 motion_planning::GaSurfaceSearchOptions surface;surface.sprayDistance=settings.gaSprayDistance;
                 repairResult=motion_planning::runGaApfCdfPipeline(document,basePath,request,settings.useCdf,surface);
@@ -2378,7 +2431,6 @@ namespace robot_qt_viewer
             m_widget.setResult(QStringLiteral("Select a solved joint trajectory before playback."), false);
             return;
         }
-        ensurePersistentCdfCollisionSetup();
 
         const std::vector<motion_planning::StoredMotionPlan> plans =
             motion_planning::MotionPlanningProjectStore::plans(m_context.document());
@@ -2391,6 +2443,14 @@ namespace robot_qt_viewer
             return;
         }
 
+        // Selection may create a detector and publish document notifications.
+        // Own the plan before that transaction rebuilds the views.
+        const auto playbackSource = *selectedPlan;
+        const bool stretchPlayback = m_cdfStagePlayback ? !m_cdfStageActualTiming : isCdfQpTrajectory(playbackSource);
+        if(m_playbackPlan) stopJointPlayback();
+        if((m_sprayMeasurementEnabled || motion_planning::CartesianMotionSampler::isMoveL(playbackSource) ||
+            !m_collisionDetectorIds.empty()) && !ensureCollisionConditions(m_sprayMeasurementEnabled)) return;
+        selectedPlan = &playbackSource;
         const int pointCount = static_cast<int>(selectedPlan->trajectory.points.size());
         if(pointCount <= 0) {
             m_widget.setResult(QStringLiteral("Selected trajectory has no inverse kinematics joint values to play."), false);
@@ -2398,7 +2458,7 @@ namespace robot_qt_viewer
         }
 
         auto timeline = std::make_unique<motion_planning::JointPlaybackTimeline>();
-        if(!timeline->reset(selectedPlan->trajectory, durationSeconds, m_cdfStagePlayback ? !m_cdfStageActualTiming : isCdfQpTrajectory(*selectedPlan))) {
+        if(!timeline->reset(selectedPlan->trajectory, durationSeconds, stretchPlayback)) {
             m_widget.setResult(QStringLiteral("Playback requires finite, matching joint groups and a positive duration."), false);
             return;
         }
@@ -2420,7 +2480,7 @@ namespace robot_qt_viewer
         m_widget.setNearestDistanceAvailable(false);
 
         const std::vector<std::string> collisionDetectorIds =
-            playbackCollisionDetectorIds(m_context.document(), m_selectedRobotId);
+            m_collisionDetectorIds;
         if(!collisionDetectorIds.empty()) {
             motion_planning::ProjectPlanningRequest validationRequest;
             validationRequest.robotId = selectedPlan->robotId;
@@ -2437,10 +2497,10 @@ namespace robot_qt_viewer
                 validationRequest,
                 &validationError);
             if(m_playbackCollisionScene == nullptr) {
-                emit statusMessageRequested(
-                    QStringLiteral("Playback collision checks are unavailable: %1")
-                        .arg(QString::fromStdString(validationError)),
-                    6000);
+                stopJointPlayback();
+                m_widget.setResult(QStringLiteral("Playback collision checks are unavailable: %1")
+                    .arg(QString::fromStdString(validationError)), false);
+                return;
             }
         }
 
@@ -2471,6 +2531,7 @@ namespace robot_qt_viewer
         m_spraySamples.reserve(selectedPlan->trajectory.points.size());
         m_sprayJointNames = selectedPlan->jointNames;
         m_sprayRobotId = m_selectedRobotId;
+        m_recordedSprayTargetId = m_sprayTargetId;
         m_sprayTrajectoryId = QString::fromStdString(selectedPlan->id);
         m_sprayPlaybackActive = true;
         m_widget.setSprayRecordingState(false, true, m_sprayExportPending);
@@ -2583,7 +2644,7 @@ namespace robot_qt_viewer
                 spraySample.timeSeconds = point.time;
                 spraySample.jointValues = point.q;
                 spraySample.runtimeJointValues = maybeMapIrb4600JointSigns(m_context.document(), m_selectedRobotId, point.q);
-                spraySample.measurement = services ? services->sprayMeasurement(m_selectedRobotId) : SprayMeasurementResult{};
+                spraySample.measurement = services ? services->sprayMeasurement(m_selectedRobotId, m_sprayTargetId) : SprayMeasurementResult{};
                 m_spraySamples.push_back(std::move(spraySample));
             }
             ++m_playbackCollisionSamples;
@@ -2649,6 +2710,7 @@ namespace robot_qt_viewer
     {
         const bool robotChanged = m_selectedRobotId != robotId;
         if(robotChanged) {
+            m_collisionDetectorIds.clear(); m_collisionRobotId.clear(); m_sprayTargetId.clear();
             clearCdfAnalysis();
             clearGraphCdfSeed();
             invalidateMultiIk();
@@ -2726,6 +2788,8 @@ namespace robot_qt_viewer
             return;
         }
 
+        if(enabled && m_playbackPlan && (m_sprayTargetId.isEmpty() || m_collisionDetectorIds.empty()))
+            stopJointPlayback();
         m_sprayMeasurementEnabled = enabled;
         if(!enabled) {
             m_currentSprayMeasurement = SprayMeasurementResult{};
@@ -2747,9 +2811,17 @@ namespace robot_qt_viewer
         if(!m_sprayMeasurementEnabled) {
             return;
         }
+        motion_planning::ProjectCdfQpRepairOptions conditions;
+        conditions.detectorIds = m_collisionDetectorIds;
+        if(m_sprayTargetId.isEmpty() || conditions.detectorIds.empty() || m_collisionRobotId != m_selectedRobotId ||
+            !motion_planning::ProjectCdfQpTrajectoryRepairService::collisionSetupConfigured(
+                m_context.document(), m_selectedRobotId.toStdString(), conditions)) {
+            m_currentSprayMeasurement = {};
+            m_widget.setSprayMeasurementText(QStringLiteral("请先设置碰撞检测条件和喷涂测量工件。")); return;
+        }
         const auto* services = m_context.motionPlanningViewport();
         m_currentSprayMeasurement = services
-            ? services->sprayMeasurement(m_selectedRobotId) : SprayMeasurementResult{};
+            ? services->sprayMeasurement(m_selectedRobotId, m_sprayTargetId) : SprayMeasurementResult{};
         const auto& result = m_currentSprayMeasurement;
         m_widget.setSprayMeasurementText(result.valid
             ? QStringLiteral("Spray distance: %1 mm\nSpray angle: %2 deg")
@@ -2797,7 +2869,7 @@ namespace robot_qt_viewer
         text.setLocale(QLocale::c());
         text.setRealNumberNotation(QTextStream::ScientificNotation);
         text.setRealNumberPrecision(10);
-        text << "# robot=" << m_sprayRobotId << " trajectory=" << m_sprayTrajectoryId << " target=A.STL\n";
+        text << "# robot=" << m_sprayRobotId << " trajectory=" << m_sprayTrajectoryId << " target=" << m_recordedSprayTargetId << '\n';
         text << "# playback_complete=" << (m_playbackFinishedNaturally ? 1 : 0) << '\n';
         text << "# Angle: 0=normal incidence; +/-90=grazing. STL normal n faces nozzle; sign=(n cross ray) dot nozzle_local_X.\n";
         text << "# time_s is source trajectory time. Joint values are radians (prismatic: meters).\n";
@@ -2836,14 +2908,13 @@ namespace robot_qt_viewer
                 : std::numeric_limits<double>::quiet_NaN());
         }
         m_widget.showSprayMeasurementPlot(distances, angles,
-            QStringLiteral("Spray measurements to A.STL - %1 / %2 (%3 points)")
-                .arg(m_sprayRobotId, m_sprayTrajectoryId).arg(m_spraySamples.size()));
+            QStringLiteral("Spray measurements to %1 - %2 / %3 (%4 points)")
+                .arg(m_recordedSprayTargetId, m_sprayRobotId, m_sprayTrajectoryId).arg(m_spraySamples.size()));
     }
 
     void MotionPlanningModuleController::plotNearestDistances()
     {
         if(m_distanceBusy || m_playbackPlan)return;
-        ensurePersistentCdfCollisionSetup();
         const auto plans=motion_planning::MotionPlanningProjectStore::plans(m_context.document());
         const auto* selected=m_cdfStagePlayback?m_cdfStagePlayback.get():
             m_multiIkPlayback?m_multiIkPlayback.get():findMotionPlan(plans,m_selectedRobotId,m_selectedTrajectoryId);
@@ -2856,7 +2927,8 @@ namespace robot_qt_viewer
         }
         motion_planning::ProjectPlanningRequest query;
         query.robotId=m_distancePlan->robotId;query.jointNames=m_distancePlan->jointNames;
-        query.collisionDetectorIds=playbackCollisionDetectorIds(m_context.document(),m_selectedRobotId);
+        if(!ensureCollisionConditions(false)) return;
+        query.collisionDetectorIds=m_collisionDetectorIds;
         if(query.collisionDetectorIds.empty()) {
             m_widget.setResult(QStringLiteral("No enabled distance detector for the selected robot/workpiece."),false);return;
         }
@@ -2922,7 +2994,7 @@ namespace robot_qt_viewer
         text.setRealNumberPrecision(16);
         const bool complete = samples.size() == plan->trajectory.points.size();
         text << "# robot=" << QString::fromStdString(plan->robotId) << " trajectory=" << QString::fromStdString(plan->id) << '\n';
-        text << "# target=A.STL\n# playback_snapshot=" << m_distanceRecordedAt << " detectors=" << detectors.join(',') << '\n';
+        text << "# playback_snapshot=" << m_distanceRecordedAt << " detectors=" << detectors.join(',') << '\n';
         text << "# complete=" << (complete ? 1 : 0) << " sampled_points=" << samples.size() << " total_points=" << plan->trajectory.points.size() << '\n';
         text << "# Nonnegative geometric distance, collision=0 mm (not penetration depth). Invalid=nan. Source points only, not continuous segment certification.\n";
         text << "# Runtime joints: radians for revolute joints, meters for prismatic joints; source timestamps in seconds.\n";

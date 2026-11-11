@@ -160,6 +160,7 @@ signals:
     void exportTransformRapidRequested();
     void exportTransformFanucRequested();
     void plotNearestDistancesRequested();
+    void collisionConditionsRequested();
     void exportNearestDistancesRequested(const QString& report);
     void multiIkRequested(bool useTool, const QVector<double>& lowerDegrees,
         const QVector<double>& upperDegrees, int seeds);
