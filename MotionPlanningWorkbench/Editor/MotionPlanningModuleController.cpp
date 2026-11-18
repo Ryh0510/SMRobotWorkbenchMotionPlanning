@@ -2448,7 +2448,9 @@ namespace robot_qt_viewer
         const auto playbackSource = *selectedPlan;
         const bool stretchPlayback = m_cdfStagePlayback ? !m_cdfStageActualTiming : isCdfQpTrajectory(playbackSource);
         if(m_playbackPlan) stopJointPlayback();
-        if((m_sprayMeasurementEnabled || motion_planning::CartesianMotionSampler::isMoveL(playbackSource) ||
+        const bool useMoveL = playbackSource.jointNames.size() == 6 ||
+            motion_planning::CartesianMotionSampler::isMoveL(playbackSource);
+        if((m_sprayMeasurementEnabled || useMoveL ||
             !m_collisionDetectorIds.empty()) && !ensureCollisionConditions(m_sprayMeasurementEnabled)) return;
         selectedPlan = &playbackSource;
         const int pointCount = static_cast<int>(selectedPlan->trajectory.points.size());
@@ -2489,6 +2491,9 @@ namespace robot_qt_viewer
             validationRequest.goal = selectedPlan->trajectory.points.back().q;
             validationRequest.collisionDetectorIds = collisionDetectorIds;
             validationRequest.validation.maxJointStep = 0.01;
+            // Match basic six-axis IK: keep raw encoder turns during simulation playback.
+            // Collision and MoveL IK remain active; all planning requests default to limits on.
+            validationRequest.enforceJointPositionLimits = selectedPlan->jointNames.size() != 6;
 
             std::string validationError;
             m_playbackCollisionScene = motion_planning::ProjectPlanningSceneBuilder::build(
@@ -2517,7 +2522,7 @@ namespace robot_qt_viewer
             if(!m_playbackXyzr || m_playbackXyzr->jointNames()!=selectedPlan->jointNames) {
                 stopJointPlayback();m_widget.setResult(QString::fromStdString("XYZR playback unavailable: "+error),false);return;
             }
-        } else if(motion_planning::CartesianMotionSampler::isMoveL(*selectedPlan)) {
+        } else if(useMoveL) {
             std::string link,error;Eigen::Isometry3d tcp;
             if(!m_playbackCollisionScene || !motion_planning::resolvePlanningTcp(m_context.document(),selectedPlan->robotId,link,tcp,error) ||
                 !(m_playbackMoveL=motion_planning::CartesianMotionSampler::create(*m_playbackCollisionScene,link,tcp,error))) {
@@ -2647,14 +2652,41 @@ namespace robot_qt_viewer
                 spraySample.measurement = services ? services->sprayMeasurement(m_selectedRobotId, m_sprayTargetId) : SprayMeasurementResult{};
                 m_spraySamples.push_back(std::move(spraySample));
             }
-            ++m_playbackCollisionSamples;
             if(m_playbackCollisionScene) {
                 const auto runtimeJoints = maybeMapIrb4600JointSigns(m_context.document(), m_selectedRobotId, point.q);
-                m_distanceRuntimePoints.push_back(runtimeJoints);
-                const auto validation = m_playbackCollisionScene->validateState(runtimeJoints);
-                if(!validation.valid) {
-                    if(validation.diagnosticCode == "state_in_collision") { ++m_playbackCollisionHits; }
-                    else { ++m_playbackInvalidSamples; }
+                const auto recordCollisionSample = [&](const std::vector<double>& sample) {
+                    ++m_playbackCollisionSamples;
+                    m_distanceRuntimePoints.push_back(sample);
+                    const auto validation = m_playbackCollisionScene->validateState(sample);
+                    if(!validation.valid) {
+                        if(validation.diagnosticCode == "state_in_collision") { ++m_playbackCollisionHits; }
+                        else { ++m_playbackInvalidSamples; }
+                    }
+                };
+                if(m_playbackMoveL && m_playbackPointIndex > 0) {
+                    const auto from = maybeMapIrb4600JointSigns(m_context.document(), m_selectedRobotId,
+                        trajectory.points[static_cast<std::size_t>(m_playbackPointIndex - 1)].q);
+                    std::vector<std::vector<double>> moveLSamples;
+                    std::string moveLError;
+                    // The displayed pose already follows this actual-model MoveL
+                    // branch. Validate every generated IK sample on that same
+                    // Cartesian segment, including the endpoint, instead of only
+                    // checking the stored joint knot.
+                    if(m_playbackMoveL->connection(from, runtimeJoints, .005, 100000,
+                        moveLSamples, moveLError)) {
+                        for(std::size_t sample = 1; sample < moveLSamples.size(); ++sample)
+                            recordCollisionSample(moveLSamples[sample]);
+                    } else {
+                        ++m_playbackCollisionSamples;
+                        ++m_playbackInvalidSamples;
+                        const int failedPoint = m_playbackPointIndex;
+                        stopJointPlayback();
+                        m_widget.setResult(QStringLiteral("MoveL %1 -> %2 failed: %3")
+                            .arg(failedPoint).arg(failedPoint + 1).arg(QString::fromStdString(moveLError)), false);
+                        return;
+                    }
+                } else {
+                    recordCollisionSample(runtimeJoints);
                 }
             }
             ++m_playbackPointIndex;
